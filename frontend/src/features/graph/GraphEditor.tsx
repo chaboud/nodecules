@@ -346,11 +346,47 @@ function GraphEditorInner() {
           nodeId={selectedNodeId}
           nodes={nodes}
           onUpdateNode={(nodeId, updates) => {
-            setNodes((nds) =>
-              nds.map((node) =>
-                node.id === nodeId ? { ...node, data: { ...node.data, ...updates } } : node
-              )
+            // Update local state
+            const updatedNodes = nodes.map((node) =>
+              node.id === nodeId ? { ...node, data: { ...node.data, ...updates } } : node
             )
+            setNodes(updatedNodes)
+            
+            // Auto-save if this is an existing graph
+            if (id) {
+              const saveGraph = async () => {
+                const graphData = {
+                  name: existingGraph?.name || 'Untitled Graph',
+                  description: existingGraph?.description || '',
+                  nodes: updatedNodes.reduce((acc, node) => {
+                    acc[node.id] = {
+                      node_id: node.id,
+                      node_type: node.data.nodeType,
+                      position: node.position,
+                      parameters: node.data.parameters || {},
+                    }
+                    return acc
+                  }, {} as Record<string, any>),
+                  edges: edges.map((edge) => ({
+                    edge_id: edge.id,
+                    source_node: edge.source,
+                    target_node: edge.target,
+                    source_port: mapPortName(edge.source, edge.sourceHandle, true),
+                    target_port: mapPortName(edge.target, edge.targetHandle, false),
+                  })),
+                  metadata: existingGraph?.metadata || {},
+                }
+                
+                try {
+                  await graphsApi.update(id, graphData)
+                  console.log('Graph auto-saved after parameter change')
+                } catch (error) {
+                  console.error('Failed to auto-save graph:', error)
+                }
+              }
+              
+              saveGraph()
+            }
           }}
           onClose={() => setSelectedNodeId(null)}
         />

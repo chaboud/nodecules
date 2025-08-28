@@ -159,3 +159,32 @@ async def delete_graph(
     
     logger.info(f"Deleted graph {graph_id}")
     return {"message": "Graph deleted successfully"}
+
+
+@router.post("/{graph_id}/copy", response_model=GraphResponse)
+async def copy_graph(
+    graph_id: UUID,
+    db: Session = Depends(get_database)
+):
+    """Create a copy of an existing graph."""
+    # Get the original graph
+    original_graph = db.query(Graph).filter(Graph.id == graph_id).first()
+    if not original_graph:
+        raise HTTPException(status_code=404, detail="Graph not found")
+    
+    # Create a new graph with copied data
+    new_graph = Graph(
+        name=f"{original_graph.name} (Copy)",
+        description=original_graph.description,
+        nodes=original_graph.nodes,
+        edges=original_graph.edges,
+        meta_data=original_graph.meta_data,
+        created_by=original_graph.created_by
+    )
+    
+    db.add(new_graph)
+    db.commit()
+    db.refresh(new_graph)
+    
+    logger.info(f"Copied graph {graph_id} to new graph {new_graph.id}")
+    return GraphResponse.model_validate(new_graph)

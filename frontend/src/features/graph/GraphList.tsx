@@ -1,7 +1,7 @@
-import React from 'react'
-import { useQuery } from '@tanstack/react-query'
+import React, { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Plus, Play, Calendar, FileText } from 'lucide-react'
+import { Plus, Play, Calendar, FileText, MoreVertical, Copy, Edit3, Trash2 } from 'lucide-react'
 import { graphsApi } from '@/services/api'
 import type { Graph } from '@/types'
 
@@ -28,7 +28,7 @@ export default function GraphList() {
   }
 
   return (
-    <div className="h-full p-6">
+    <div className="min-h-full p-6">
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
@@ -69,25 +69,140 @@ export default function GraphList() {
 }
 
 function GraphCard({ graph }: { graph: Graph }) {
+  const [showMenu, setShowMenu] = useState(false)
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [newName, setNewName] = useState(graph.name)
+  const queryClient = useQueryClient()
+  
   const nodeCount = Object.keys(graph.nodes).length
   const edgeCount = graph.edges.length
   
+  const deleteMutation = useMutation({
+    mutationFn: () => graphsApi.delete(graph.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['graphs'] })
+    },
+  })
+  
+  const copyMutation = useMutation({
+    mutationFn: () => graphsApi.copy(graph.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['graphs'] })
+    },
+  })
+  
+  const updateMutation = useMutation({
+    mutationFn: (name: string) => graphsApi.update(graph.id, { name }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['graphs'] })
+      setIsRenaming(false)
+    },
+  })
+  
+  const handleDelete = async () => {
+    if (confirm(`Are you sure you want to delete "${graph.name}"? This action cannot be undone.`)) {
+      deleteMutation.mutate()
+    }
+  }
+  
+  const handleCopy = () => {
+    copyMutation.mutate()
+    setShowMenu(false)
+  }
+  
+  const handleRename = () => {
+    if (newName.trim() && newName !== graph.name) {
+      updateMutation.mutate(newName.trim())
+    } else {
+      setIsRenaming(false)
+      setNewName(graph.name)
+    }
+  }
+  
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      handleRename()
+    } else if (e.key === 'Escape') {
+      setIsRenaming(false)
+      setNewName(graph.name)
+    }
+  }
+  
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-6 hover:shadow-lg transition-shadow">
+    <div className="bg-white rounded-lg border border-gray-200 p-6 hover:shadow-lg transition-shadow relative">
       <div className="flex items-start justify-between mb-4">
         <div className="flex-1">
-          <h3 className="text-lg font-semibold text-gray-900 mb-1">{graph.name}</h3>
+          {isRenaming ? (
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onBlur={handleRename}
+              onKeyDown={handleKeyPress}
+              className="text-lg font-semibold text-gray-900 mb-1 w-full border border-blue-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              autoFocus
+            />
+          ) : (
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">{graph.name}</h3>
+          )}
           {graph.description && (
             <p className="text-sm text-gray-500 line-clamp-2">{graph.description}</p>
           )}
         </div>
-        <Link
-          to={`/graph/${graph.id}`}
-          className="ml-4 p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
-          title="Open graph"
-        >
-          <Play className="h-4 w-4" />
-        </Link>
+        
+        <div className="ml-4 flex items-center space-x-1">
+          <Link
+            to={`/graph/${graph.id}`}
+            className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+            title="Open graph"
+          >
+            <Play className="h-4 w-4" />
+          </Link>
+          
+          <div className="relative">
+            <button
+              onClick={() => setShowMenu(!showMenu)}
+              className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-colors"
+            >
+              <MoreVertical className="h-4 w-4" />
+            </button>
+            
+            {showMenu && (
+              <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg border border-gray-200 z-10">
+                <div className="py-1">
+                  <button
+                    onClick={() => {
+                      setIsRenaming(true)
+                      setShowMenu(false)
+                    }}
+                    className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  >
+                    <Edit3 className="h-4 w-4 mr-3" />
+                    Rename
+                  </button>
+                  
+                  <button
+                    onClick={handleCopy}
+                    disabled={copyMutation.isPending}
+                    className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                  >
+                    <Copy className="h-4 w-4 mr-3" />
+                    {copyMutation.isPending ? 'Copying...' : 'Duplicate'}
+                  </button>
+                  
+                  <button
+                    onClick={handleDelete}
+                    disabled={deleteMutation.isPending}
+                    className="flex items-center w-full px-4 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-4 w-4 mr-3" />
+                    {deleteMutation.isPending ? 'Deleting...' : 'Delete'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
       
       <div className="flex items-center justify-between text-sm text-gray-500 mb-4">
@@ -109,6 +224,14 @@ function GraphCard({ graph }: { graph: Graph }) {
           Open →
         </Link>
       </div>
+      
+      {/* Click outside to close menu */}
+      {showMenu && (
+        <div 
+          className="fixed inset-0 z-0" 
+          onClick={() => setShowMenu(false)}
+        />
+      )}
     </div>
   )
 }

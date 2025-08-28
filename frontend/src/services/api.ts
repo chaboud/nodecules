@@ -45,6 +45,11 @@ export const graphsApi = {
   async delete(id: string): Promise<void> {
     await api.delete(`/graphs/${id}`)
   },
+
+  async copy(id: string): Promise<Graph> {
+    const response = await api.post(`/graphs/${id}/copy`)
+    return response.data
+  },
 }
 
 export const executionsApi = {

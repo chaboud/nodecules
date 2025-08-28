@@ -77,7 +77,7 @@ class GraphResponse(BaseModel):
 
 class ExecutionCreateRequest(BaseModel):
     """Request to execute a graph."""
-    graph_id: UUID
+    graph_id: str  # Can be UUID or graph name
     inputs: Dict[str, Any] = Field(default_factory=dict)
 
 

@@ -50,6 +50,11 @@ export const graphsApi = {
     const response = await api.post(`/graphs/${id}/copy`)
     return response.data
   },
+
+  async getSchema(id: string): Promise<any> {
+    const response = await api.get(`/graphs/${id}/schema`)
+    return response.data
+  },
 }
 
 export const executionsApi = {

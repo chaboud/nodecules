@@ -11,6 +11,7 @@ from ..models.schemas import Graph, Execution
 from ..core.types import GraphData, NodeData, EdgeData
 from ..core.executor import GraphExecutor
 from .models import ExecutionCreateRequest, ExecutionResponse, ErrorResponse
+from .graphs import resolve_graph_by_id_or_name
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -24,10 +25,8 @@ async def execute_graph(
 ):
     """Execute a graph."""
     try:
-        # Get graph from database
-        db_graph = db.query(Graph).filter(Graph.id == request.graph_id).first()
-        if not db_graph:
-            raise HTTPException(status_code=404, detail="Graph not found")
+        # Get graph from database by ID or name
+        db_graph = resolve_graph_by_id_or_name(request.graph_id, db)
         
         # Convert to internal format
         nodes = {}
@@ -59,7 +58,7 @@ async def execute_graph(
         
         # Create execution record
         db_execution = Execution(
-            graph_id=request.graph_id,
+            graph_id=db_graph.id,
             status="pending",
             inputs=request.inputs
         )

@@ -24,6 +24,12 @@ class InputNode(BaseNode):
             ],
             parameters=[
                 ParameterSpec(
+                    name="label",
+                    data_type="string",
+                    default="",
+                    description="Friendly name for this input (e.g., 'source_text', 'temperature')"
+                ),
+                ParameterSpec(
                     name="value",
                     data_type="string",
                     default="",
@@ -40,11 +46,35 @@ class InputNode(BaseNode):
         super().__init__(spec)
         
     async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
-        # Check if there's an execution input for this node
-        if node_data.node_id in context.execution_inputs:
+        # Try multiple input resolution methods in order of priority
+        value = None
+        
+        # 1. Try by label (if specified)
+        label = node_data.parameters.get("label", "").strip()
+        if label and label in context.execution_inputs:
+            value = context.execution_inputs[label]
+        
+        # 2. Try by ordinal (input_1, input_2, etc.)
+        if value is None:
+            # Find this node's ordinal position among input nodes
+            input_nodes = [node_id for node_id, node in context.graph.nodes.items() 
+                          if node.node_type == "input"]
+            input_nodes.sort()  # Ensure consistent ordering
+            
+            try:
+                ordinal = input_nodes.index(node_data.node_id) + 1  # 1-based indexing
+                ordinal_key = f"input_{ordinal}"
+                if ordinal_key in context.execution_inputs:
+                    value = context.execution_inputs[ordinal_key]
+            except ValueError:
+                pass  # Node not found in input_nodes (shouldn't happen)
+        
+        # 3. Try by node ID (backwards compatibility)
+        if value is None and node_data.node_id in context.execution_inputs:
             value = context.execution_inputs[node_data.node_id]
-        else:
-            # Fall back to parameter value
+        
+        # 4. Fall back to parameter value
+        if value is None:
             value = node_data.parameters.get("value", "")
             
         data_type = node_data.parameters.get("data_type", "text")
@@ -237,7 +267,9 @@ class OutputNode(BaseNode):
             inputs=[
                 PortSpec(name="input", data_type=DataType.ANY, description="Data to output")
             ],
-            outputs=[],
+            outputs=[
+                PortSpec(name="result", data_type=DataType.ANY, description="Output result for capture")
+            ],
             parameters=[
                 ParameterSpec(
                     name="label",
@@ -253,11 +285,14 @@ class OutputNode(BaseNode):
         input_value = context.get_input_value(node_data.node_id, "input")
         label = node_data.parameters.get("label", "Output")
         
-        # Store the output in the context for retrieval
-        # This could be displayed in UI or logged
+        # Log the output (for debugging/monitoring)
         print(f"{label}: {input_value}")
         
-        return {}
+        # Return the input value as output so it appears in execution results
+        return {
+            "result": input_value,
+            "label": label
+        }
 
 
 # Registry of built-in nodes

@@ -74,10 +74,18 @@ const ExecutionDialog: React.FC<ExecutionDialogProps> = ({
                 const dataType = node.data.parameters?.data_type || 'text'
                 const currentValue = inputs[node.id] || ''
                 
+                const nodeLabel = node.data.parameters?.label || ''
+                const displayName = nodeLabel || `Input ${inputNodes.indexOf(node) + 1}`
+                
                 return (
                   <div key={node.id} className="space-y-2">
                     <label className="block text-sm font-medium text-gray-700">
-                      {node.data.label || node.data.nodeType} ({node.id})
+                      {displayName}
+                      {nodeLabel && (
+                        <span className="text-blue-600 font-mono text-xs ml-2">
+                          ({nodeLabel})
+                        </span>
+                      )}
                       <span className="text-gray-500 font-normal ml-1">
                         - {dataType}
                       </span>

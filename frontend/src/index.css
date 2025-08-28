@@ -1,0 +1,51 @@
+/* React Flow styles - must come first */
+@import 'reactflow/dist/style.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom React Flow node styles */
+.react-flow__node-custom {
+  @apply bg-white border-2 border-gray-300 rounded-lg shadow-md;
+}
+
+.react-flow__node-custom.selected {
+  @apply border-blue-500;
+}
+
+.react-flow__node-custom .react-flow__handle {
+  @apply w-3 h-3;
+}
+
+.react-flow__node-custom .react-flow__handle-top {
+  @apply -top-1.5;
+}
+
+.react-flow__node-custom .react-flow__handle-bottom {
+  @apply -bottom-1.5;
+}
+
+.react-flow__node-custom .react-flow__handle-left {
+  @apply -left-1.5;
+}
+
+.react-flow__node-custom .react-flow__handle-right {
+  @apply -right-1.5;
+}

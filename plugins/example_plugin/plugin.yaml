@@ -1,0 +1,13 @@
+name: example_plugin
+version: 1.0.0
+author: Nodecules Team
+description: Example plugin demonstrating basic text processing
+license: MIT
+
+entry_point: example_plugin.py
+
+node_types:
+  - example_processor
+
+dependencies:
+  - requests>=2.28.0

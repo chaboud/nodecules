@@ -1,0 +1,1 @@
+"""Core execution engine for nodecules."""

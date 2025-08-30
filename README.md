@@ -1,6 +1,6 @@
 # Nodecules
 
-A complete node-based graph processing engine for building flexible, scalable data processing workflows. Similar to ComfyUI but designed for general-purpose data processing with extensible LLM integration capabilities.
+A complete node-based graph processing engine for building flexible, scalable data processing workflows. Designed for general-purpose data processing with extensible LLM integration capabilities.
 
 ## 🚀 Features
 

@@ -83,6 +83,29 @@ class BaseProviderAdapter(ABC):
         """Generate response and return (response, updated_context_data)."""
         pass
     
+    async def generate_with_context_streaming(
+        self,
+        context_data: Dict[str, Any],
+        new_message: str,
+        **kwargs
+    ) -> tuple[Any, Dict[str, Any]]:
+        """
+        Generate streaming response and return (stream_generator, updated_context_data).
+        
+        The stream_generator yields text chunks as they arrive from the provider.
+        Default implementation falls back to non-streaming.
+        """
+        # Fallback to non-streaming
+        response, updated_context = await self.generate_with_context(
+            context_data, new_message, **kwargs
+        )
+        
+        # Yield the full response as a single chunk
+        async def single_chunk_generator():
+            yield response
+        
+        return single_chunk_generator(), updated_context
+    
     @abstractmethod
     def create_new_context(self, system_prompt: str = None) -> Dict[str, Any]:
         """Create new context data for this provider."""
@@ -128,7 +151,7 @@ class OllamaAdapter(BaseProviderAdapter):
         full_prompt = "\n\n".join(prompt_parts)
         
         # Call Ollama
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=1200.0) as client:  # 20 minutes
             response = await client.post(
                 f"{self.base_url}/api/generate",
                 json={
@@ -136,8 +159,7 @@ class OllamaAdapter(BaseProviderAdapter):
                     "prompt": full_prompt,
                     "stream": False,
                     "options": {
-                        "temperature": temperature,
-                        "num_predict": 1000
+                        "temperature": temperature
                     }
                 }
             )
@@ -159,6 +181,94 @@ class OllamaAdapter(BaseProviderAdapter):
         }
         
         return ai_response, updated_context
+    
+    async def generate_with_context_streaming(
+        self,
+        context_data: Dict[str, Any],
+        new_message: str,
+        model: str = "llama2",
+        temperature: float = 0.7,
+        **kwargs
+    ) -> tuple[Any, Dict[str, Any]]:
+        """Generate streaming response with Ollama."""
+        import httpx
+        import json
+        
+        # Get message history
+        messages = context_data.get("messages", [])
+        
+        # Add new user message (make a copy to avoid mutation)
+        messages = messages + [{"role": "user", "content": new_message}]
+        
+        # Convert to Ollama prompt format
+        prompt_parts = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                prompt_parts.append(f"System: {content}")
+            elif role == "user":
+                prompt_parts.append(f"Human: {content}")
+            elif role == "assistant":
+                prompt_parts.append(f"Assistant: {content}")
+        
+        prompt_parts.append("Assistant:")
+        full_prompt = "\n\n".join(prompt_parts)
+        
+        # Prepare updated context
+        updated_context = {
+            "messages": messages,  # Will be updated with full response later
+            "last_model": model,
+            "last_temperature": temperature
+        }
+        
+        async def ollama_stream_generator():
+            full_response = ""
+            try:
+                async with httpx.AsyncClient(timeout=1200.0) as client:  # 20 minutes
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/api/generate",
+                        json={
+                            "model": model,
+                            "prompt": full_prompt,
+                            "stream": True,
+                            "options": {
+                                "temperature": temperature
+                            }
+                        }
+                    ) as response:
+                        if response.status_code != 200:
+                            yield f"Ollama error: HTTP {response.status_code}"
+                            return
+                        
+                        async for line in response.aiter_lines():
+                            if line.strip():
+                                try:
+                                    chunk_data = json.loads(line)
+                                    if "response" in chunk_data:
+                                        text_chunk = chunk_data["response"]
+                                        full_response += text_chunk
+                                        yield text_chunk
+                                    
+                                    # Check if done
+                                    if chunk_data.get("done", False):
+                                        break
+                                        
+                                except json.JSONDecodeError:
+                                    continue
+                                    
+            except Exception as e:
+                yield f"Streaming error: {str(e)}"
+                return
+            
+            # Update context with complete response
+            updated_context["messages"].append({
+                "role": "assistant", 
+                "content": full_response
+            })
+        
+        return ollama_stream_generator(), updated_context
     
     def create_new_context(self, system_prompt: str = None) -> Dict[str, Any]:
         """Create new context for Ollama."""
@@ -308,6 +418,57 @@ class SmartContextManager:
             
         finally:
             db.close()
+    
+    async def continue_conversation_streaming(
+        self,
+        context_id: str,
+        new_message: str,
+        model: str = None,
+        **provider_kwargs
+    ) -> tuple[Any, str]:
+        """Continue conversation with streaming and return (stream_generator, context_id)."""
+        
+        # Load context
+        context = await self._load_context(context_id)
+        if not context:
+            raise ValueError(f"Context {context_id} not found")
+        
+        # Get provider adapter
+        adapter = self.adapters.get(context.provider)
+        if not adapter:
+            raise ValueError(f"Unsupported provider: {context.provider}")
+        
+        # Generate streaming response
+        stream_generator, updated_provider_data = await adapter.generate_with_context_streaming(
+            context.provider_context_data,
+            new_message,
+            model=model or "default",
+            **provider_kwargs
+        )
+        
+        # Create a wrapper that updates context when streaming completes
+        async def context_updating_stream():
+            async for chunk in stream_generator:
+                yield chunk
+            
+            # Update context after streaming completes
+            context.provider_context_data = updated_provider_data
+            context.messages = updated_provider_data.get("messages", context.messages)
+            context.turn_count += 1
+            context.last_updated = datetime.utcnow()
+            
+            db = next(get_database())
+            try:
+                db.merge(context)
+                db.commit()
+                
+                # Update cache
+                self._cache_context(context_id, context)
+                
+            finally:
+                db.close()
+        
+        return context_updating_stream(), context_id
     
     async def get_context_info(self, context_id: str) -> Optional[Dict[str, Any]]:
         """Get context information for external systems."""

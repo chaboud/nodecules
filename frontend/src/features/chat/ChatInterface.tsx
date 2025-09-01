@@ -25,8 +25,14 @@ export default function ChatInterface() {
   const [contextToken, setContextToken] = useState<string>('')
   const [showHelp, setShowHelp] = useState(false)
   const [graphInputs, setGraphInputs] = useState<Record<string, any>>({})
+  const [thinkingState, setThinkingState] = useState<{
+    isThinking: boolean
+    message: string
+    startTime?: number
+  }>({ isThinking: false, message: '' })
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   // Fetch available graphs
   const { data: graphs, isLoading: graphsLoading } = useQuery({
@@ -41,21 +47,42 @@ export default function ChatInterface() {
     enabled: !!selectedGraph,
   })
 
-  // Execute graph mutation
-  const executeMutation = useMutation({
-    mutationFn: async ({ graphId, inputs }: { graphId: string, inputs: Record<string, any> }) => {
-      const response = await fetch(`/api/v1/graphs/${graphId}/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs })
-      })
-      if (!response.ok) throw new Error('Failed to execute graph')
-      return response.json() as Promise<ChatResponse>
+  // Always use streaming execution - handles both streaming and non-streaming graphs
+  const executeGraphMutation = useMutation({
+    mutationFn: async ({ graphId, inputs, onChunk, abortSignal }: { 
+      graphId: string, 
+      inputs: Record<string, any>,
+      onChunk: (chunk: any) => void,
+      abortSignal?: AbortSignal
+    }) => {
+      const { executionsApi } = await import('@/services/api')
+      await executionsApi.executeStreaming(
+        { graph_id: graphId, inputs },
+        onChunk,
+        abortSignal
+      )
     }
   })
 
+  const handleCancel = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+      setThinkingState({ isThinking: false, message: '' })
+      
+      // Add cancellation message
+      const cancelMessage: Message = {
+        id: Date.now().toString(),
+        type: 'assistant',
+        content: '🚫 Request cancelled by user',
+        timestamp: new Date()
+      }
+      setMessages(prev => [...prev, cancelMessage])
+    }
+  }
+
   const handleSendMessage = async () => {
-    if (!inputMessage.trim() || !selectedGraph || executeMutation.isPending) return
+    if (!inputMessage.trim() || !selectedGraph || executeGraphMutation.isPending) return
 
     const userMessage = inputMessage.trim()
     const messageId = Date.now().toString()
@@ -70,68 +97,105 @@ export default function ChatInterface() {
     setMessages(prev => [...prev, newUserMessage])
     setInputMessage('')
 
+    const inputs = {
+      // Core chat inputs using underscore naming convention
+      chat_message: userMessage,
+      chat_context: contextToken,
+      // Include all graph input values
+      ...graphInputs
+    }
+
     try {
-      // Execute graph with message + context token + graph inputs
-      const result = await executeMutation.mutateAsync({
+      // Create abort controller for cancellation
+      const abortController = new AbortController()
+      abortControllerRef.current = abortController
+      
+      // Always use streaming execution - handles both streaming and non-streaming graphs
+      setThinkingState({ isThinking: true, message: 'Starting...', startTime: Date.now() })
+      
+      // Create placeholder message for streaming
+      const aiMessageId = (Date.now() + 1).toString()
+      const aiMessage: Message = {
+        id: aiMessageId,
+        type: 'assistant',
+        content: '',
+        timestamp: new Date()
+      }
+      setMessages(prev => [...prev, aiMessage])
+
+      let finalOutputs: any = {}
+      let streamedContent = ''
+
+      await executeGraphMutation.mutateAsync({
         graphId: selectedGraph,
-        inputs: {
-          // Core chat inputs using underscore naming convention
-          chat_message: userMessage,
-          chat_context: contextToken,
-          // Include all graph input values
-          ...graphInputs
+        inputs,
+        abortSignal: abortController.signal,
+        onChunk: (chunk: any) => {
+          console.log('Streaming chunk:', chunk)
+          
+          if (chunk.type === 'node_chunk') {
+            // Update streaming content (real-time for streaming nodes)
+            streamedContent += chunk.chunk
+            setMessages(prev => prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { ...msg, content: streamedContent }
+                : msg
+            ))
+            setThinkingState({ isThinking: true, message: 'Streaming response...', startTime: Date.now() })
+            
+          } else if (chunk.type === 'node_complete') {
+            // Node completed - for non-streaming nodes, this gives us the full response
+            if (chunk.node_id === 'chat_ai' && !streamedContent) {
+              // Non-streaming chat node completed - use its response output
+              const nodeResponse = chunk.outputs?.response || ''
+              setMessages(prev => prev.map(msg => 
+                msg.id === aiMessageId 
+                  ? { ...msg, content: nodeResponse }
+                  : msg
+              ))
+            }
+            
+          } else if (chunk.type === 'execution_complete') {
+            // Execution finished
+            finalOutputs = chunk.outputs
+            setThinkingState({ isThinking: false, message: '' })
+            
+            // Update context token for next message
+            if (finalOutputs.new_context) {
+              const newContextToken = finalOutputs.new_context.result || finalOutputs.new_context.context_key
+              if (newContextToken) {
+                setContextToken(newContextToken)
+              }
+            }
+            
+          } else if (chunk.type === 'execution_error') {
+            // Handle error
+            setMessages(prev => prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { ...msg, content: `Error: ${chunk.error}` }
+                : msg
+            ))
+            setThinkingState({ isThinking: false, message: '' })
+          }
         }
       })
-
-      if (result.status === 'completed') {
-        // Extract response from chat_response output node
-        let aiResponse = '✅ Graph executed successfully'
-        
-        // Look for chat_response node output
-        if (result.outputs['chat_response']) {
-          const chatOutput = result.outputs['chat_response']
-          if (typeof chatOutput === 'object' && chatOutput !== null) {
-            aiResponse = chatOutput.result || chatOutput.response || 'Graph executed (no text response)'
-          } else {
-            aiResponse = String(chatOutput)
-          }
-        } else {
-          // No chat_response node - show generic success message
-          aiResponse = '✅ Graph executed successfully (no chat_response output node)'
-        }
-
-        // Add AI response
-        const aiMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          type: 'assistant',
-          content: aiResponse,
-          timestamp: new Date()
-        }
-        setMessages(prev => [...prev, aiMessage])
-
-        // Update context token for next message
-        if (result.context_tokens && Object.keys(result.context_tokens).length > 0) {
-          const firstContextToken = Object.values(result.context_tokens)[0]
-          setContextToken(firstContextToken)
-        }
-      } else {
-        // Show error message
+      
+    } catch (error) {
+      setThinkingState({ isThinking: false, message: '' })
+      
+      // Don't show error if it was user cancellation
+      if (error instanceof Error && error.name !== 'AbortError') {
         const errorMessage: Message = {
-          id: (Date.now() + 1).toString(),
+          id: (Date.now() + 1).toString(), 
           type: 'assistant',
-          content: `Error: ${JSON.stringify(result.errors)}`,
+          content: `Error: ${error.message}`,
           timestamp: new Date()
         }
         setMessages(prev => [...prev, errorMessage])
       }
-    } catch (error) {
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(), 
-        type: 'assistant',
-        content: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        timestamp: new Date()
-      }
-      setMessages(prev => [...prev, errorMessage])
+    } finally {
+      // Clean up abort controller
+      abortControllerRef.current = null
     }
     
     // Refocus input after sending
@@ -224,10 +288,10 @@ export default function ChatInterface() {
 
   // Also scroll when mutation status changes (for "Thinking..." state)
   useEffect(() => {
-    if (executeMutation.isPending) {
+    if (executeGraphMutation.isPending) {
       scrollToBottom()
     }
-  }, [executeMutation.isPending])
+  }, [executeGraphMutation.isPending])
 
   const handleReset = () => {
     setMessages([])
@@ -385,14 +449,29 @@ export default function ChatInterface() {
             ))
           )}
           
-          {executeMutation.isPending && (
+          {executeGraphMutation.isPending && (
             <div className="flex justify-start">
               <div className="flex items-start space-x-3 max-w-2xl">
                 <div className="w-8 h-8 rounded-full flex items-center justify-center bg-green-600">
                   <Bot className="h-4 w-4 text-white" />
                 </div>
                 <div className="bg-white text-gray-900 border border-gray-200 rounded-lg px-4 py-2">
-                  <p className="text-gray-500">Thinking...</p>
+                  <div className="flex items-center justify-between space-x-4">
+                    <p className="text-gray-500">
+                      {thinkingState.message || 'Thinking...'}
+                      {thinkingState.startTime && (
+                        <span className="text-xs text-gray-400 ml-2">
+                          ({Math.floor((Date.now() - thinkingState.startTime) / 1000)}s)
+                        </span>
+                      )}
+                    </p>
+                    <button
+                      onClick={handleCancel}
+                      className="text-red-500 hover:text-red-700 text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -483,12 +562,12 @@ export default function ChatInterface() {
                 placeholder={selectedGraph ? "Type your message..." : "Please select a graph first"}
                 className="w-full border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
                 rows={1}
-                disabled={!selectedGraph || executeMutation.isPending}
+                disabled={!selectedGraph || executeGraphMutation.isPending}
               />
             </div>
             <button
               onClick={handleSendMessage}
-              disabled={!inputMessage.trim() || !selectedGraph || executeMutation.isPending}
+              disabled={!inputMessage.trim() || !selectedGraph || executeGraphMutation.isPending}
               className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               <Send className="h-5 w-5" />

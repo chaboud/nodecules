@@ -63,6 +63,51 @@ export const executionsApi = {
     return response.data
   },
 
+  async executeStreaming(data: ExecuteGraphRequest, onChunk: (chunk: any) => void, abortSignal?: AbortSignal): Promise<void> {
+    const response = await fetch(`${api.defaults.baseURL}/executions/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(data),
+      signal: abortSignal,
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+
+    if (!reader) {
+      throw new Error('No response body')
+    }
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value)
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              onChunk(data)
+            } catch (e) {
+              console.error('Failed to parse streaming data:', e)
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+  },
+
   async get(id: string): Promise<Execution> {
     const response = await api.get(`/executions/${id}`)
     return response.data

@@ -1,6 +1,6 @@
 """Immutable smart chat node using content-addressable contexts."""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, AsyncGenerator
 
 from ..core.types import NodeSpec, PortSpec, ParameterSpec, DataType, ExecutionContext, NodeData, BaseNode
 from ..core.content_addressable_context import content_addressable_context
@@ -99,6 +99,12 @@ class ImmutableChatNode(BaseNode):
                     default=0.7,
                     description="Response temperature",
                     constraints={"min": 0.0, "max": 2.0}
+                ),
+                ParameterSpec(
+                    name="streaming",
+                    data_type="boolean",
+                    default=False,
+                    description="Enable streaming response"
                 )
             ]
         )
@@ -133,6 +139,7 @@ class ImmutableChatNode(BaseNode):
             temperature = params.get("temperature", 0.7)
         
         provider = context.get_input_value(node_data.node_id, "provider") or params.get("provider", "ollama")
+        streaming = params.get("streaming", False)
         
         if not message:
             return {
@@ -159,13 +166,30 @@ class ImmutableChatNode(BaseNode):
                 "provider_type": "full_history"
             }
             
-            # Generate response using Ollama
-            response, _ = await self.ollama.generate_with_context(
-                context_data=context_data,
-                new_message=message,
-                model=model,
-                temperature=temperature
-            )
+            if streaming:
+                # Generate streaming response
+                stream_generator, _ = await self.ollama.generate_with_context_streaming(
+                    context_data=context_data,
+                    new_message=message,
+                    model=model,
+                    temperature=temperature
+                )
+                
+                # Collect full response from stream
+                response_parts = []
+                async for chunk in stream_generator:
+                    response_parts.append(chunk)
+                
+                response = "".join(response_parts)
+                
+            else:
+                # Generate response using non-streaming
+                response, _ = await self.ollama.generate_with_context(
+                    context_data=context_data,
+                    new_message=message,
+                    model=model,
+                    temperature=temperature
+                )
             
             # Create new message list with the conversation
             new_messages = prev_messages + [
@@ -188,6 +212,74 @@ class ImmutableChatNode(BaseNode):
                 "context_key": prev_context_key or "error",
                 "message_count": "0"
             }
+    
+    async def execute_streaming(self, context: ExecutionContext, node_data: NodeData) -> AsyncGenerator[str, None]:
+        """Execute with streaming response."""
+        # Get inputs
+        message = context.get_input_value(node_data.node_id, "message")
+        prev_context_key = context.get_input_value(node_data.node_id, "context_key")
+        
+        # Also check for injected context key from instance execution
+        if not prev_context_key:
+            prev_context_key = context.execution_inputs.get("_context_key")
+        
+        # Get parameters with input override support
+        params = node_data.parameters
+        
+        # Use input values if connected, otherwise fall back to node parameters
+        model = context.get_input_value(node_data.node_id, "model") or params.get("model", "llama3.2:3b")
+        system_prompt = context.get_input_value(node_data.node_id, "system_prompt") or params.get("system_prompt", "You are a helpful AI assistant.")
+        temperature = context.get_input_value(node_data.node_id, "temperature")
+        if temperature is not None:
+            try:
+                temperature = float(temperature)
+            except (ValueError, TypeError):
+                temperature = params.get("temperature", 0.7)
+        else:
+            temperature = params.get("temperature", 0.7)
+        
+        provider = context.get_input_value(node_data.node_id, "provider") or params.get("provider", "ollama")
+        
+        if not message:
+            yield "Error: No message provided"
+            return
+        
+        try:
+            # Load previous context if exists
+            prev_messages = []
+            if prev_context_key:
+                prev_context = await content_addressable_context.load_context(prev_context_key)
+                if prev_context:
+                    prev_messages = prev_context["messages"]
+            
+            # If no previous messages, start with system prompt
+            if not prev_messages:
+                prev_messages = [{"role": "system", "content": system_prompt}]
+            
+            # Create context data for Ollama
+            context_data = {
+                "messages": prev_messages,
+                "provider_type": "full_history"
+            }
+            
+            # Generate streaming response
+            stream_generator, _ = await self.ollama.generate_with_context_streaming(
+                context_data=context_data,
+                new_message=message,
+                model=model,
+                temperature=temperature
+            )
+            
+            # Stream the response
+            response_parts = []
+            async for chunk in stream_generator:
+                response_parts.append(chunk)
+                yield chunk
+            
+            # Final response will be handled by regular execute method
+            
+        except Exception as e:
+            yield f"Error: {str(e)}"
 
 
 # Registry

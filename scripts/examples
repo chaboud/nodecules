@@ -1,0 +1,18 @@
+#!/bin/bash
+# Nodecules Example Manager - Simple wrapper
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$SCRIPT_DIR/../backend"
+
+# Check if we're in the right environment
+if [[ ! -d "$BACKEND_DIR/venv" ]]; then
+    echo "❌ Backend virtual environment not found. Please run ./dev-setup.sh first."
+    exit 1
+fi
+
+# Activate virtual environment and run the Python script
+cd "$BACKEND_DIR"
+source venv/bin/activate
+python "$SCRIPT_DIR/manage_examples.py" "$@"

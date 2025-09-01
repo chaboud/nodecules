@@ -55,6 +55,32 @@ class GraphExecutor:
             raise ExecutionError(f"Graph execution failed: {e}") from e
             
         return context
+    
+    async def execute_graph_with_context(self, context: ExecutionContext) -> ExecutionContext:
+        """Execute a graph with an existing context (for instance execution)."""
+        # Initialize all nodes as pending
+        for node_id in context.graph.nodes:
+            context.set_node_status(node_id, NodeStatus.PENDING)
+            
+        try:
+            planner = GraphExecutionPlanner(context.graph)
+            execution_order = planner.get_execution_order()
+            
+            logger.info(f"Executing graph {context.graph.graph_id} with {len(execution_order)} nodes")
+            
+            # Execute nodes in order
+            for node_id in execution_order:
+                await self._execute_node(context, node_id)
+                
+            context.completed_at = datetime.utcnow()
+            logger.info(f"Graph {context.graph.graph_id} execution completed")
+            
+        except Exception as e:
+            context.completed_at = datetime.utcnow()
+            logger.error(f"Graph {context.graph.graph_id} execution failed: {e}")
+            raise ExecutionError(f"Graph execution failed: {e}") from e
+            
+        return context
         
     async def execute_parallel_batches(self, graph: GraphData, inputs: Optional[Dict[str, Any]] = None) -> ExecutionContext:
         """Execute graph with parallel batches."""

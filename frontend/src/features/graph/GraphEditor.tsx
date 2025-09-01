@@ -107,6 +107,7 @@ function GraphEditorInner() {
           nodeType: nodeData.node_type,
           parameters: nodeData.parameters || {},
           label: nodeData.node_type,
+          description: nodeData.description,
         },
       }))
       
@@ -124,7 +125,20 @@ function GraphEditorInner() {
   }, [existingGraph, setNodes, setEdges])
 
   const onConnect = useCallback(
-    (params: Connection) => setEdges((eds) => addEdge(params, eds)),
+    (params: Connection) => {
+      // Log the connection for debugging
+      console.log('Connection params:', params)
+      
+      // Ensure we have the proper handle IDs
+      const connection = {
+        ...params,
+        sourceHandle: params.sourceHandle || 'output',
+        targetHandle: params.targetHandle || 'input',
+      }
+      
+      console.log('Processed connection:', connection)
+      setEdges((eds) => addEdge(connection, eds))
+    },
     [setEdges],
   )
 
@@ -182,6 +196,7 @@ function GraphEditorInner() {
           node_type: node.data.nodeType,
           position: node.position,
           parameters: node.data.parameters || {},
+          description: node.data.description,
         }
         return acc
       }, {} as Record<string, any>),
@@ -232,6 +247,7 @@ function GraphEditorInner() {
               node_type: node.data.nodeType,
               position: node.position,
               parameters: node.data.parameters || {},
+              description: node.data.description,
             }
             return acc
           }, {} as Record<string, any>),
@@ -346,10 +362,31 @@ function GraphEditorInner() {
           nodeId={selectedNodeId}
           nodes={nodes}
           onUpdateNode={(nodeId, updates) => {
-            // Update local state
-            const updatedNodes = nodes.map((node) =>
-              node.id === nodeId ? { ...node, data: { ...node.data, ...updates } } : node
+            // Handle node ID changes
+            let updatedNodes = nodes.map((node) =>
+              node.id === nodeId ? { 
+                ...node, 
+                id: updates.newId || node.id,
+                data: { ...node.data, ...updates } 
+              } : node
             )
+            
+            // Update edges if node ID changed
+            let updatedEdges = edges
+            if (updates.newId && updates.newId !== nodeId) {
+              updatedEdges = edges.map((edge) => ({
+                ...edge,
+                source: edge.source === nodeId ? updates.newId : edge.source,
+                target: edge.target === nodeId ? updates.newId : edge.target,
+              }))
+              setEdges(updatedEdges)
+              
+              // Update selected node ID if it's the one being renamed
+              if (selectedNodeId === nodeId) {
+                setSelectedNodeId(updates.newId)
+              }
+            }
+            
             setNodes(updatedNodes)
             
             // Auto-save if this is an existing graph
@@ -364,10 +401,11 @@ function GraphEditorInner() {
                       node_type: node.data.nodeType,
                       position: node.position,
                       parameters: node.data.parameters || {},
+                      description: node.data.description,
                     }
                     return acc
                   }, {} as Record<string, any>),
-                  edges: edges.map((edge) => ({
+                  edges: updatedEdges.map((edge) => ({
                     edge_id: edge.id,
                     source_node: edge.source,
                     target_node: edge.target,

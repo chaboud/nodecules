@@ -75,10 +75,19 @@ class GraphResponse(BaseModel):
         return super().model_validate(obj)
 
 
+class ContextAction(BaseModel):
+    """Context action for graph execution."""
+    action: str = Field(description="Action: 'new', 'continue', 'rewind'")
+    context_id: Optional[str] = Field(default=None, description="Context ID for continue/rewind")
+    conversation_id: Optional[str] = Field(default=None, description="Conversation ID for new contexts")
+    rewind_steps: Optional[int] = Field(default=None, description="Steps to rewind (for rewind action)")
+
+
 class ExecutionCreateRequest(BaseModel):
     """Request to execute a graph."""
     graph_id: str  # Can be UUID or graph name
     inputs: Dict[str, Any] = Field(default_factory=dict)
+    context_action: Optional[ContextAction] = Field(default=None, description="Context management action")
 
 
 class ExecutionResponse(BaseModel):
@@ -132,3 +141,17 @@ class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
     errors: Optional[List[str]] = None
+
+
+class GraphExecuteRequest(BaseModel):
+    """Request for direct graph execution."""
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GraphExecuteResponse(BaseModel):
+    """Response for direct graph execution."""
+    outputs: Dict[str, Any] = Field(default_factory=dict)
+    context_tokens: Dict[str, str] = Field(default_factory=dict)  # Any context tokens found in outputs
+    execution_id: str
+    status: str
+    errors: Dict[str, Any] = Field(default_factory=dict)

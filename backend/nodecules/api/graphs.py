@@ -13,6 +13,8 @@ from .models import (
     GraphCreateRequest, 
     GraphUpdateRequest, 
     GraphResponse, 
+    GraphExecuteRequest,
+    GraphExecuteResponse,
     ErrorResponse
 )
 
@@ -273,3 +275,68 @@ async def get_graph_schema(
             }
         }
     }
+
+
+@router.post("/{graph_identifier}/execute", response_model=GraphExecuteResponse)
+async def execute_graph(
+    graph_identifier: str,
+    request: GraphExecuteRequest,
+    db: Session = Depends(get_database)
+):
+    """Execute a graph directly with inputs and get outputs + context tokens."""
+    from ..core.executor import GraphExecutor
+    from ..plugins.builtin_nodes import BUILTIN_NODES
+    from ..core.types import ExecutionContext
+    from datetime import datetime
+    from uuid import uuid4
+    
+    graph = resolve_graph_by_id_or_name(graph_identifier, db)
+    
+    # Convert to GraphData
+    graph_data = GraphData(
+        graph_id=str(graph.id),
+        name=graph.name,
+        nodes={node_id: NodeData(**node_info) for node_id, node_info in graph.nodes.items()},
+        edges=[EdgeData(**edge_info) for edge_info in graph.edges],
+        meta_data=graph.meta_data or {}
+    )
+    
+    # Execute
+    executor = GraphExecutor(BUILTIN_NODES)
+    execution_id = str(uuid4())
+    
+    context = ExecutionContext(
+        execution_id=execution_id,
+        graph=graph_data,
+        execution_inputs=request.inputs,
+        started_at=datetime.utcnow()
+    )
+    
+    try:
+        final_context = await executor.execute_graph_with_context(context)
+        
+        # Extract context tokens from outputs (look for context_key, context_id, etc.)
+        context_tokens = {}
+        for node_id, outputs in final_context.node_outputs.items():
+            if isinstance(outputs, dict):
+                for key, value in outputs.items():
+                    if key in ["context_key", "context_id", "context_token"] and value:
+                        context_tokens[key] = str(value)
+        
+        return GraphExecuteResponse(
+            outputs=final_context.node_outputs,
+            context_tokens=context_tokens,
+            execution_id=execution_id,
+            status="completed" if not final_context.errors else "failed",
+            errors=final_context.errors
+        )
+        
+    except Exception as e:
+        logger.error(f"Graph execution failed: {e}")
+        return GraphExecuteResponse(
+            outputs={},
+            context_tokens={},
+            execution_id=execution_id,
+            status="failed",
+            errors={"system": str(e)}
+        )

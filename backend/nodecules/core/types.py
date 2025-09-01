@@ -25,6 +25,7 @@ class DataType(str, Enum):
     VIDEO = "video"
     JSON = "json"
     FILE = "file"
+    CONTEXT = "context"
     ANY = "any"
 
 

@@ -19,6 +19,9 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
 }) => {
   const node = nodes.find((n) => n.id === nodeId)
   const [parameters, setParameters] = useState<Record<string, any>>({})
+  const [nodeLabel, setNodeLabel] = useState('')
+  const [nodeIdValue, setNodeIdValue] = useState('')
+  const [nodeDescription, setNodeDescription] = useState('')
   
   // Load node specification to understand available parameters
   const { data: nodeSpec } = useQuery({
@@ -27,12 +30,15 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
     enabled: !!node?.data.nodeType,
   })
 
-  // Initialize parameters from node data
+  // Initialize all editable fields from node data
   useEffect(() => {
     if (node) {
       setParameters(node.data.parameters || {})
+      setNodeLabel(node.data.label || node.data.nodeType)
+      setNodeIdValue(node.id)
+      setNodeDescription(node.data.description || nodeSpec?.description || '')
     }
-  }, [node])
+  }, [node, nodeSpec])
 
   if (!node) return null
 
@@ -44,7 +50,12 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
   }
 
   const handleSave = () => {
-    onUpdateNode(nodeId, { parameters })
+    onUpdateNode(nodeId, { 
+      parameters,
+      label: nodeLabel,
+      newId: nodeIdValue !== nodeId ? nodeIdValue : undefined,
+      description: nodeDescription
+    })
   }
 
   const renderParameterInput = (param: any) => {
@@ -116,22 +127,58 @@ const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
       <div className="flex-1 overflow-y-auto p-4">
         {/* Node Info */}
         <div className="mb-6">
-          <h4 className="text-sm font-medium text-gray-900 mb-2">Node Information</h4>
-          <div className="bg-gray-50 rounded-md p-3 text-sm">
-            <div className="mb-2">
+          <h4 className="text-sm font-medium text-gray-900 mb-2">Node Configuration</h4>
+          <div className="bg-gray-50 rounded-md p-3 text-sm space-y-3">
+            {/* Read-only Type */}
+            <div>
               <span className="font-medium">Type:</span>{' '}
               <span className="text-gray-600">{node.data.nodeType}</span>
             </div>
-            <div className="mb-2">
-              <span className="font-medium">ID:</span>{' '}
-              <span className="text-gray-600 font-mono text-xs">{node.id}</span>
+            
+            {/* Editable Node ID */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Node ID 
+                <span className="text-blue-600 text-xs ml-1">(How other nodes reference this)</span>
+              </label>
+              <input
+                type="text"
+                value={nodeIdValue}
+                onChange={(e) => setNodeIdValue(e.target.value)}
+                className="block w-full border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono"
+                placeholder="unique_node_id"
+              />
             </div>
-            {nodeSpec && (
-              <div>
-                <span className="font-medium">Description:</span>{' '}
-                <span className="text-gray-600">{nodeSpec.description}</span>
-              </div>
-            )}
+
+            {/* Editable Description */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Description
+                <span className="text-gray-500 text-xs ml-1">(What this node does)</span>
+              </label>
+              <textarea
+                value={nodeDescription}
+                onChange={(e) => setNodeDescription(e.target.value)}
+                className="block w-full border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder="Describe what this node does..."
+                rows={2}
+              />
+            </div>
+            
+            {/* Editable Display Label */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Display Label
+                <span className="text-gray-500 text-xs ml-1">(Shown on node)</span>
+              </label>
+              <input
+                type="text"
+                value={nodeLabel}
+                onChange={(e) => setNodeLabel(e.target.value)}
+                className="block w-full border border-gray-300 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                placeholder={node.data.nodeType}
+              />
+            </div>
           </div>
         </div>
 

@@ -40,7 +40,7 @@ class InputNode(BaseNode):
                     data_type="string", 
                     default="text",
                     description="Data type (text, json, number)"
-                )
+                ),
             ]
         )
         super().__init__(spec)
@@ -276,7 +276,7 @@ class OutputNode(BaseNode):
                     data_type="string",
                     default="Output",
                     description="Label for the output"
-                )
+                ),
             ]
         )
         super().__init__(spec)
@@ -295,11 +295,20 @@ class OutputNode(BaseNode):
         }
 
 
+# Import core chat nodes  
+from .smart_chat_node import SMART_CHAT_NODES
+from .immutable_chat_node import IMMUTABLE_CHAT_NODES
+# Import specialized nodes
+from .graph_nodes import GRAPH_NODES
+
 # Registry of built-in nodes
 BUILTIN_NODES = {
     "input": InputNode,
     "text_transform": TextTransformNode,
     "text_filter": TextFilterNode,
     "text_concat": TextConcatNode,
-    "output": OutputNode
+    "output": OutputNode,
+    **SMART_CHAT_NODES,  # Smart context-aware chat
+    **IMMUTABLE_CHAT_NODES,  # Immutable content-addressable chat
+    **GRAPH_NODES,  # Graph-as-node functionality
 }

@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.graphs import router as graphs_router
 from .api.executions import router as executions_router
 from .api.plugins import router as plugins_router
+from .api.instances import router as instances_router
 from .core.executor import NodeRegistry
 from .plugins.loader import PluginManager
 from .plugins.builtin_nodes import BUILTIN_NODES
@@ -75,6 +76,7 @@ app.add_middleware(
 # Include routers
 app.include_router(graphs_router, prefix="/api/v1/graphs", tags=["graphs"])
 app.include_router(executions_router, prefix="/api/v1/executions", tags=["executions"])
+app.include_router(instances_router, prefix="/api/v1/instances", tags=["instances"])
 app.include_router(plugins_router, prefix="/api/v1/plugins", tags=["plugins"])
 
 

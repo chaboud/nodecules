@@ -1,0 +1,60 @@
+{
+  "name": "Basic LLM Chat",
+  "description": "Simple conversational chat with context memory",
+  "nodes": {
+    "user_input": {
+      "node_id": "user_input", 
+      "node_type": "input",
+      "position": {"x": 100, "y": 200},
+      "parameters": {
+        "label": "user_message",
+        "value": "Hello! How are you doing today?",
+        "data_type": "text"
+      }
+    },
+    "chat_llm": {
+      "node_id": "chat_llm",
+      "node_type": "llm", 
+      "position": {"x": 400, "y": 200},
+      "parameters": {
+        "provider": "claude",
+        "model": "mock-claude",
+        "system_prompt": "You are a friendly, helpful AI assistant. Keep your responses conversational and engaging.",
+        "temperature": 0.7,
+        "max_tokens": 1000
+      }
+    },
+    "chat_output": {
+      "node_id": "chat_output",
+      "node_type": "output",
+      "position": {"x": 700, "y": 200}, 
+      "parameters": {
+        "label": "Assistant Response"
+      }
+    }
+  },
+  "edges": [
+    {
+      "edge_id": "input_to_llm",
+      "source_node": "user_input",
+      "source_port": "output", 
+      "target_node": "chat_llm",
+      "target_port": "message"
+    },
+    {
+      "edge_id": "llm_to_output",
+      "source_node": "chat_llm",
+      "source_port": "response",
+      "target_node": "chat_output", 
+      "target_port": "input"
+    }
+  ],
+  "metadata": {
+    "description": "This graph creates a basic chat interface that maintains conversation context across multiple executions. Each run will remember the previous conversation history.",
+    "usage_examples": [
+      "First run: 'Hello! How are you?' -> Creates new conversation context",
+      "Second run: 'Tell me a joke' -> Continues same conversation context",
+      "Third run: 'That was funny, tell me another' -> Remembers the previous joke"
+    ]
+  }
+}

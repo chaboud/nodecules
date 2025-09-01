@@ -62,94 +62,113 @@ const CustomNode: React.FC<NodeProps<CustomNodeData>> = ({
   const hasInputs = inputPorts.length > 0 || (!nodeSpec && !['input'].includes(data.nodeType))
   const hasOutputs = outputPorts.length > 0 || (!nodeSpec && !['output'].includes(data.nodeType))
 
+  // Calculate minimum height based on port count
+  const maxPorts = Math.max(inputPorts.length, outputPorts.length, 1)
+  const minHeight = Math.max(80, 30 + (maxPorts * 25) + 10) // Base height + ports + padding
+
   return (
-    <div className={`
-      relative min-w-[160px] rounded-lg border-2 shadow-sm transition-all duration-200
-      ${getNodeColor()}
-      ${selected ? 'shadow-lg ring-2 ring-blue-300' : 'shadow-sm'}
-    `}>
-      {/* Input Handles */}
-      {inputPorts.length > 0 ? (
-        inputPorts.map((port, index) => (
-          <Handle
-            key={port.name}
-            type="target"
-            position={Position.Left}
-            id={port.name}
-            style={{ top: `${30 + (index * 20)}px` }}
-            className="w-3 h-3 bg-gray-400 border-2 border-white"
-          />
-        ))
-      ) : (
-        hasInputs && (
-          <Handle
-            type="target"
-            position={Position.Left}
-            id="input"
-            className="w-3 h-3 bg-gray-400 border-2 border-white"
-          />
-        )
-      )}
-
-      {/* Node Content */}
-      <div className="p-3">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center space-x-2">
-            <span className="text-xs font-medium uppercase tracking-wide">
-              {data.nodeType.replace('_', ' ')}
-            </span>
-            {getStatusIcon()}
-          </div>
-          
-          {hasParameters && (
-            <Settings className="h-3 w-3 text-gray-400" />
-          )}
+    <div 
+      className={`
+        group relative min-w-[180px] rounded-lg border-2 shadow-sm transition-all duration-200
+        ${getNodeColor()}
+        ${selected ? 'shadow-lg ring-2 ring-blue-300' : 'shadow-sm'}
+      `}
+      style={{ minHeight: `${minHeight}px` }}
+    >
+      {/* Header Tab - Title and Settings */}
+      <div className="flex items-center justify-between px-3 py-2 bg-white bg-opacity-50 rounded-t-md border-b">
+        <div className="flex items-center space-x-2">
+          <span className="text-sm font-semibold text-gray-800">
+            {data.label || data.nodeType.replace('_', ' ').toUpperCase()}
+          </span>
+          {getStatusIcon()}
         </div>
-
-        {/* Node Label */}
-        <div className="text-sm font-medium">
-          {data.label || data.nodeType}
-        </div>
-
-        {/* Parameters Preview */}
         {hasParameters && (
-          <div className="mt-2 text-xs text-gray-600">
-            {Object.entries(data.parameters).slice(0, 2).map(([key, value]) => (
-              <div key={key} className="truncate">
-                {key}: {String(value)}
+          <Settings className="h-4 w-4 text-gray-500" />
+        )}
+      </div>
+
+      {/* Port Areas */}
+      <div className="flex">
+        {/* Input Port Area */}
+        {(inputPorts.length > 0 || hasInputs) && (
+          <div className="flex-1 p-2">
+            <div className="text-[10px] font-medium text-blue-600 mb-1">INPUTS</div>
+            {inputPorts.length > 0 ? (
+              inputPorts.map((port, index) => (
+                <div key={port.name} className="relative flex items-center mb-1">
+                  <Handle
+                    type="target"
+                    position={Position.Left}
+                    id={port.name}
+                    className="!absolute !left-0 w-3 h-3 bg-blue-400 border-2 border-white hover:bg-blue-600 transition-colors"
+                    style={{ left: '-6px' }}
+                  />
+                  <span className="text-[9px] text-gray-600 ml-2">{port.name}</span>
+                </div>
+              ))
+            ) : (
+              <div className="relative flex items-center mb-1">
+                <Handle
+                  type="target"
+                  position={Position.Left}
+                  id="input"
+                  className="!absolute !left-0 w-3 h-3 bg-blue-400 border-2 border-white"
+                  style={{ left: '-6px' }}
+                />
+                <span className="text-[9px] text-gray-600 ml-2">input</span>
               </div>
-            ))}
-            {Object.keys(data.parameters).length > 2 && (
-              <div className="text-gray-400">
-                +{Object.keys(data.parameters).length - 2} more...
+            )}
+          </div>
+        )}
+
+        {/* Output Port Area */}
+        {(outputPorts.length > 0 || hasOutputs) && (
+          <div className="flex-1 p-2">
+            <div className="text-[10px] font-medium text-green-600 mb-1 text-right">OUTPUTS</div>
+            {outputPorts.length > 0 ? (
+              outputPorts.map((port, index) => (
+                <div key={port.name} className="relative flex items-center justify-end mb-1">
+                  <span className="text-[9px] text-gray-600 mr-2">{port.name}</span>
+                  <Handle
+                    type="source"
+                    position={Position.Right}
+                    id={port.name}
+                    className="!absolute !right-0 w-3 h-3 bg-green-400 border-2 border-white hover:bg-green-600 transition-colors"
+                    style={{ right: '-6px' }}
+                  />
+                </div>
+              ))
+            ) : (
+              <div className="relative flex items-center justify-end mb-1">
+                <span className="text-[9px] text-gray-600 mr-2">output</span>
+                <Handle
+                  type="source"
+                  position={Position.Right}
+                  id="output"
+                  className="!absolute !right-0 w-3 h-3 bg-green-400 border-2 border-white"
+                  style={{ right: '-6px' }}
+                />
               </div>
             )}
           </div>
         )}
       </div>
 
-      {/* Output Handles */}
-      {outputPorts.length > 0 ? (
-        outputPorts.map((port, index) => (
-          <Handle
-            key={port.name}
-            type="source"
-            position={Position.Right}
-            id={port.name}
-            style={{ top: `${30 + (index * 20)}px` }}
-            className="w-3 h-3 bg-gray-400 border-2 border-white"
-          />
-        ))
-      ) : (
-        hasOutputs && (
-          <Handle
-            type="source"
-            position={Position.Right}
-            id="output"
-            className="w-3 h-3 bg-gray-400 border-2 border-white"
-          />
-        )
+      {/* Parameters Preview at bottom */}
+      {hasParameters && (
+        <div className="px-3 py-2 text-[9px] text-gray-500 bg-gray-50 rounded-b-md border-t">
+          {Object.entries(data.parameters).slice(0, 2).map(([key, value]) => (
+            <div key={key} className="truncate">
+              <span className="font-medium">{key}:</span> {String(value).slice(0, 15)}{String(value).length > 15 && '...'}
+            </div>
+          ))}
+          {Object.keys(data.parameters).length > 2 && (
+            <div className="text-gray-400">
+              +{Object.keys(data.parameters).length - 2} more
+            </div>
+          )}
+        </div>
       )}
     </div>
   )

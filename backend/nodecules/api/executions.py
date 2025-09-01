@@ -10,7 +10,7 @@ from ..models.database import get_database
 from ..models.schemas import Graph, Execution
 from ..core.types import GraphData, NodeData, EdgeData
 from ..core.executor import GraphExecutor
-from .models import ExecutionCreateRequest, ExecutionResponse, ErrorResponse
+from .models import ExecutionCreateRequest, ExecutionResponse, ErrorResponse, ContextAction
 from .graphs import resolve_graph_by_id_or_name
 
 router = APIRouter()
@@ -23,8 +23,43 @@ async def execute_graph(
     fastapi_request: Request,
     db: Session = Depends(get_database)
 ):
-    """Execute a graph."""
+    """Execute a graph with optional context management."""
     try:
+        # Handle context actions first
+        execution_inputs = request.inputs.copy()
+        
+        if request.context_action:
+            context_action = request.context_action
+            
+            if context_action.action == "continue" and context_action.context_id:
+                # Continue from existing context - add context to inputs
+                execution_inputs["_context"] = context_action.context_id
+                
+            elif context_action.action == "rewind" and context_action.context_id:
+                # Rewind context first, then continue
+                from ..core.context_service import context_service
+                
+                # Load and rewind context
+                current_context = await context_service.get_context(context_action.context_id, db)
+                if current_context:
+                    # Simple rewind by removing last N message pairs
+                    steps_back = context_action.rewind_steps or 1
+                    messages_to_remove = steps_back * 2  # user + assistant pairs
+                    
+                    if messages_to_remove < len(current_context.messages):
+                        current_context.messages = current_context.messages[:-messages_to_remove]
+                    
+                    # Create new context step and store
+                    rewound_context = current_context.create_next_step()
+                    await context_service.store_context(rewound_context, db)
+                    
+                    execution_inputs["_context"] = rewound_context.context_id
+                
+            elif context_action.action == "new":
+                # Create new context if conversation_id specified
+                if context_action.conversation_id:
+                    execution_inputs["_conversation_id"] = context_action.conversation_id
+        
         # Get graph from database by ID or name
         db_graph = resolve_graph_by_id_or_name(request.graph_id, db)
         
@@ -60,7 +95,7 @@ async def execute_graph(
         db_execution = Execution(
             graph_id=db_graph.id,
             status="pending",
-            inputs=request.inputs
+            inputs=execution_inputs  # Use processed inputs with context
         )
         db.add(db_execution)
         db.commit()
@@ -72,7 +107,7 @@ async def execute_graph(
             
             # Execute graph
             executor = GraphExecutor(node_registry.get_all())
-            context = await executor.execute_graph(graph_data, request.inputs)
+            context = await executor.execute_graph(graph_data, execution_inputs)
             
             # Update execution record with results
             db_execution.status = "completed"

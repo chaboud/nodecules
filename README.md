@@ -1,17 +1,32 @@
 # Nodecules
 
-A complete node-based graph processing engine for building flexible, scalable data processing workflows. Designed for general-purpose data processing with extensible LLM integration capabilities.
+A complete node-based graph processing engine for building flexible AI-powered workflows with visual graph editing and conversational interfaces.
 
 ## 🚀 Features
 
-- **Visual Graph Editor** - Professional React Flow-based interface with drag-drop
-- **Complete Graph Management** - Create, edit, copy, delete, and execute graphs
-- **Flexible Input System** - Multiple input resolution methods (labels, ordinals, node IDs)
-- **Graph Execution by Name** - Call graphs by friendly names instead of UUIDs
-- **Plugin System** - Extensible architecture for custom node types
-- **REST API** - Full API access for external integrations
-- **Real-time Execution** - Live execution with labeled outputs
-- **Production Ready** - Docker-based environment with PostgreSQL + Redis
+### 🎨 **Visual Graph Editor**
+- Professional React Flow-based interface with drag-drop node creation
+- Real-time node property editing with validation
+- Visual connection management with port-specific targeting
+- Clean folder-tab style node layout with organized input/output ports
+
+### 💬 **Chat Interface**
+- Interactive chat interface for executing graphs conversationally
+- Dynamic parameter exposure from graph input nodes
+- Automatic conversation context management
+- Support for various graph types (interactive, write-only, read-only)
+
+### 🤖 **AI Integration**
+- **Ollama** support for local LLM execution
+- **Immutable content-addressable contexts** for efficient memory management
+- Smart context management with provider-native optimization
+- Multiple chat node types (smart_chat, immutable_chat)
+
+### 🔧 **Advanced Graph Management**
+- Create, edit, copy, delete, and execute graphs
+- Flexible input system (labels, ordinals, node IDs, chat conventions)
+- Graph execution by name for API integration
+- Real-time parameter configuration and execution
 
 ## 🏁 Quick Start
 
@@ -62,6 +77,15 @@ A complete node-based graph processing engine for building flexible, scalable da
 4. Configure node parameters in the properties panel
 5. Execute graphs and view results in real-time
 
+### Chat Interface
+1. Navigate to the "Chat" tab in the application
+2. Select a graph with proper chat conventions:
+   - Input node with ID `chat_message` (receives user messages)
+   - Output node with ID `chat_response` (displays AI responses)
+   - Optional input node `chat_context` (for conversation memory)
+3. Additional input nodes appear as user controls (temperature sliders, model selectors, etc.)
+4. Type messages and interact with your graph conversationally
+
 ### API Integration
 
 #### Execute a graph by name:
@@ -96,11 +120,17 @@ curl -s "http://localhost:8000/api/v1/graphs/" | jq '.[].name'
 
 ### Built-in Node Types
 
+#### **Core Nodes**
 - **Input Node** - Collects user input with configurable labels and data types
-- **Text Transform** - Transforms text (uppercase, lowercase, title case)
-- **Text Filter** - Filters text based on patterns and conditions
-- **Text Concat** - Concatenates multiple text inputs
 - **Output Node** - Displays results with custom labels
+- **Text Transform** - Text operations (uppercase, lowercase, title case)
+- **Text Filter** - Pattern-based text filtering with regex support
+- **Text Concat** - Multi-input text concatenation
+
+#### **AI Nodes**
+- **Smart Chat** - Context-aware conversational AI with provider adapters
+- **Immutable Chat** - Memory-efficient chat with content-addressable contexts
+- Support for parameter inputs (model, temperature, system_prompt)
 
 ### Input Resolution Methods
 
@@ -109,6 +139,7 @@ The system supports multiple ways to provide inputs:
 1. **By Label** - Use friendly names: `{"greeting": "Hello"}`
 2. **By Ordinal** - Use position: `{"input_1": "Hello", "input_2": "World"}`
 3. **By Node ID** - Direct node reference: `{"node_abc123": "Hello"}`
+4. **Chat Convention** - Special IDs for chat interface: `{"chat_message": "Hello", "chat_context": "..."}`
 
 ## 🔧 Development
 
@@ -191,24 +222,25 @@ Output: `ELITE POTATO FARMERS FROM IDAHO UNITE FOR BETTER SPUDS !!!`
 
 ## 🚧 Roadmap
 
-### Current Status: ✅ Fully Functional System
+### ✅ **Completed Features**
+- **Visual Graph Editor** - Professional React Flow interface
+- **Chat Interface** - Conversational graph execution
+- **AI Integration** - Ollama support with context management
+- **Flexible Input System** - Multiple input resolution methods
+- **Content-Addressable Contexts** - Efficient memory management
 
-### Next Phase: LLM Integration
-- [ ] **Process with LLM node** supporting:
-  - [ ] Ollama (local models)
-  - [ ] Anthropic Claude API
-  - [ ] AWS Bedrock
-  - [ ] OpenAI API
-  - [ ] Azure OpenAI
-- [ ] **Advanced prompt engineering nodes**
-- [ ] **Multi-modal support** (images, documents, audio)
+### 🎯 **Next Phase: Enhanced AI Experience**
+- [ ] **Streaming Responses** - Real-time response generation with thinking indicators
+- [ ] **Setup Scripts** - Database initialization with example graphs
+- [ ] **Additional LLM Providers** - Anthropic Claude, OpenAI, Azure OpenAI
+- [ ] **Multi-modal Support** - Images, documents, audio processing
 
-### Future Enhancements
-- [ ] Conditional logic nodes
-- [ ] Loop and iteration capabilities
+### 🔮 **Future Enhancements**
+- [ ] Conditional logic and branching nodes
+- [ ] Loop and iteration capabilities  
 - [ ] External API connectors
 - [ ] File I/O operations
-- [ ] Real-time streaming execution
+- [ ] Advanced prompt engineering tools
 
 ## 📄 API Documentation
 
@@ -234,5 +266,5 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-**Status**: Production ready with full graph processing capabilities  
-**Next Milestone**: LLM integration for advanced AI workflows
+**Status**: Production ready with AI-powered graph processing and chat interface  
+**Next Milestone**: Streaming responses and enhanced setup tooling

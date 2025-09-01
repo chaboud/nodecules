@@ -12,6 +12,7 @@ interface Message {
   content: string
   timestamp: Date
   showMarkdown?: boolean
+  rawExecutionData?: any  // Store the raw execution output for debugging
 }
 
 interface ChatResponse {
@@ -146,6 +147,7 @@ export default function ChatInterface() {
 
       let finalOutputs: any = {}
       let streamedContent = ''
+      let allChunks: any[] = []  // Collect all chunks for debugging
 
       await executeGraphMutation.mutateAsync({
         graphId: selectedGraph,
@@ -153,15 +155,18 @@ export default function ChatInterface() {
         abortSignal: abortController.signal,
         onChunk: (chunk: any) => {
           console.log('Streaming chunk:', chunk)
+          allChunks.push(chunk)  // Store for debug view
           
           if (chunk.type === 'node_chunk') {
-            // Update streaming content (real-time for streaming nodes)
-            streamedContent += chunk.chunk
+            // Only show streaming from the final output node (not all streaming nodes)
+            // For multi_pass_chat, the final output should come from a specific node
+            // For now, don't stream - let the final result show at the end
+            // streamedContent += chunk.chunk  // Commented out - causes mixed streaming
             setMessages(prev => prev.map(msg => 
               msg.id === aiMessageId 
                 ? { 
                     ...msg, 
-                    content: streamedContent,
+                    content: `Processing... (${chunk.node_id})`,
                     showMarkdown: hasMarkdownContent(streamedContent) ? true : undefined
                   }
                 : msg
@@ -169,25 +174,73 @@ export default function ChatInterface() {
             setThinkingState({ isThinking: true, message: 'Streaming response...', startTime: Date.now() })
             
           } else if (chunk.type === 'node_complete') {
-            // Node completed - for non-streaming nodes, this gives us the full response
-            if (chunk.node_id === 'chat_ai' && !streamedContent) {
-              // Non-streaming chat node completed - use its response output
-              const nodeResponse = chunk.outputs?.response || ''
-              setMessages(prev => prev.map(msg => 
-                msg.id === aiMessageId 
-                  ? { 
-                      ...msg, 
-                      content: nodeResponse,
-                      showMarkdown: hasMarkdownContent(nodeResponse) ? true : undefined
-                    }
-                  : msg
-              ))
+            // Node completed - check for any potential response content
+            // This handles non-streaming nodes that might provide final responses
+            if (!streamedContent && chunk.outputs) {
+              // Look for common response patterns from different node types
+              const possibleResponse = chunk.outputs.response || 
+                                     chunk.outputs.result || 
+                                     chunk.outputs.output || 
+                                     chunk.outputs.processed || ''
+              
+              if (possibleResponse && typeof possibleResponse === 'string') {
+                setMessages(prev => prev.map(msg => 
+                  msg.id === aiMessageId 
+                    ? { 
+                        ...msg, 
+                        content: possibleResponse,
+                        showMarkdown: hasMarkdownContent(possibleResponse) ? true : undefined
+                      }
+                    : msg
+                ))
+              }
             }
             
           } else if (chunk.type === 'execution_complete') {
             // Execution finished
             finalOutputs = chunk.outputs
             setThinkingState({ isThinking: false, message: '' })
+            
+            // Extract the final response from the appropriate output node
+            let finalResponse = streamedContent
+            if (!finalResponse) {
+              // Look for common output node patterns (prioritize "response" field)
+              const chatResponse = finalOutputs.chat_response?.response || 
+                                 finalOutputs.chat_response?.result ||
+                                 finalOutputs.chat_response?.output
+              
+              const outputNode = finalOutputs.output?.response ||
+                               finalOutputs.output?.result ||
+                               finalOutputs.output?.output
+              
+              const resultNode = finalOutputs.result?.response ||
+                               finalOutputs.result?.result ||
+                               finalOutputs.result?.output
+              
+              finalResponse = chatResponse || outputNode || resultNode || 'No response found in output nodes'
+            }
+            
+            // Update the message with final response and complete debug data
+            setMessages(prev => prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { 
+                    ...msg,
+                    content: finalResponse,
+                    showMarkdown: hasMarkdownContent(finalResponse) ? true : true, // Default to formatted always
+                    selectedNodeType: 'output', // Default to output nodes
+                    selectedNodeName: 'chat_response', // Default to chat_response
+                    rawExecutionData: {
+                      finalOutputs,
+                      allChunks,
+                      inputs,
+                      executionComplete: chunk,
+                      extractedResponse: finalResponse,
+                      streamedLength: streamedContent.length,
+                      graphId: selectedGraph
+                    }
+                  }
+                : msg
+            ))
             
             // Update context token for next message
             if (finalOutputs.new_context) {
@@ -201,7 +254,17 @@ export default function ChatInterface() {
             // Handle error
             setMessages(prev => prev.map(msg => 
               msg.id === aiMessageId 
-                ? { ...msg, content: `Error: ${chunk.error}` }
+                ? { 
+                    ...msg, 
+                    content: `Error: ${chunk.error}`,
+                    rawExecutionData: {
+                      error: chunk,
+                      allChunks,
+                      inputs,
+                      streamedContent,
+                      streamedLength: streamedContent.length
+                    }
+                  }
                 : msg
             ))
             setThinkingState({ isThinking: false, message: '' })
@@ -468,38 +531,216 @@ export default function ChatInterface() {
                   }`}>
                     {/* Message Content */}
                     <div className="mb-2">
-                      {message.type === 'assistant' && hasMarkdownContent(message.content) ? (
+                      {message.type === 'assistant' && message.rawExecutionData ? (
                         <>
-                          {/* Format Selector */}
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs text-gray-500">Format:</span>
-                            <select
-                              value={message.showMarkdown === true ? 'markdown' : 'raw'}
-                              onChange={(e) => {
-                                const newValue = e.target.value === 'markdown'
-                                setMessages(prev => prev.map(msg => 
-                                  msg.id === message.id 
-                                    ? { ...msg, showMarkdown: newValue }
-                                    : msg
-                                ))
-                              }}
-                              className="text-xs px-2 py-1 rounded bg-gray-100 border border-gray-300 text-gray-600 hover:bg-gray-200"
-                            >
-                              <option value="markdown">📝 Formatted</option>
-                              <option value="raw">💻 Raw</option>
-                            </select>
+                          {/* Format Selector Bar - Sticky */}
+                          <div className="sticky top-0 z-10 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 pb-2 mb-2">
+                            <div className="flex items-center justify-between gap-4 text-xs">
+                              {/* Type Filter (leftmost) */}
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">Type filter:</span>
+                                <select
+                                  value={message.selectedNodeType || 'output'}
+                                  onChange={(e) => {
+                                    const newType = e.target.value
+                                    const availableNodes = message.rawExecutionData?.finalOutputs 
+                                      ? Object.keys(message.rawExecutionData.finalOutputs).filter(nodeId => {
+                                          if (newType === '(all)') return true
+                                          if (newType === 'output') return nodeId.includes('output') || nodeId.includes('response') || nodeId === 'chat_response'
+                                          if (newType === 'input') return nodeId.includes('input')
+                                          if (newType === 'chat') return nodeId.includes('chat')
+                                          if (newType === 'processing') return nodeId.includes('processor') || nodeId.includes('concat') || nodeId.includes('transform')
+                                          return true
+                                        })
+                                      : []
+                                    
+                                    // Smart default for node name
+                                    let defaultNodeName = '(all)'
+                                    if (newType === 'output' && availableNodes.includes('chat_response')) {
+                                      defaultNodeName = 'chat_response'
+                                    }
+                                    
+                                    setMessages(prev => prev.map(msg => 
+                                      msg.id === message.id 
+                                        ? { 
+                                            ...msg, 
+                                            selectedNodeType: newType,
+                                            selectedNodeName: defaultNodeName,
+                                            // Auto-force debug JSON for multi-data or nodes without response data
+                                            showMarkdown: (() => {
+                                              const isMultiData = (newType === '(all)' || defaultNodeName === '(all)')
+                                              if (isMultiData) return 'debug'
+                                              
+                                              const nodeData = message.rawExecutionData?.finalOutputs?.[defaultNodeName]
+                                              const hasResponse = nodeData && (nodeData.response || nodeData.result || nodeData.output)
+                                              return hasResponse ? msg.showMarkdown : 'debug'
+                                            })()
+                                          }
+                                        : msg
+                                    ))
+                                  }}
+                                  className="px-2 py-1 rounded bg-gray-100 border border-gray-300 text-gray-600 hover:bg-gray-200"
+                                >
+                                  <option value="(all)">(all)</option>
+                                  <option value="output">output</option>
+                                  <option value="input">input</option>
+                                  <option value="chat">chat</option>
+                                  <option value="processing">processing</option>
+                                </select>
+                              </div>
+
+                              {/* Node Filter (middle) */}
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">Node filter:</span>
+                                <select
+                                  value={message.selectedNodeName || 'chat_response'}
+                                  onChange={(e) => {
+                                    setMessages(prev => prev.map(msg => 
+                                      msg.id === message.id 
+                                        ? { 
+                                            ...msg, 
+                                            selectedNodeName: e.target.value,
+                                            // Auto-force debug JSON for multi-data or nodes without response data
+                                            showMarkdown: (() => {
+                                              if (e.target.value === '(all)') return 'debug'
+                                              
+                                              const nodeData = message.rawExecutionData?.finalOutputs?.[e.target.value]
+                                              const hasResponse = nodeData && (nodeData.response || nodeData.result || nodeData.output)
+                                              return hasResponse ? msg.showMarkdown : 'debug'
+                                            })()
+                                          }
+                                        : msg
+                                    ))
+                                  }}
+                                  className="px-2 py-1 rounded bg-gray-100 border border-gray-300 text-gray-600 hover:bg-gray-200"
+                                >
+                                  <option value="(all)">(all)</option>
+                                  {/* Dynamically populate based on type filter */}
+                                  {message.rawExecutionData?.finalOutputs && 
+                                    Object.keys(message.rawExecutionData.finalOutputs)
+                                      .filter(nodeId => {
+                                        const nodeType = message.selectedNodeType || 'output'
+                                        if (nodeType === '(all)') return true
+                                        if (nodeType === 'output') return nodeId.includes('output') || nodeId.includes('response') || nodeId === 'chat_response'
+                                        if (nodeType === 'input') return nodeId.includes('input')
+                                        if (nodeType === 'chat') return nodeId.includes('chat')
+                                        if (nodeType === 'processing') return nodeId.includes('processor') || nodeId.includes('concat') || nodeId.includes('transform')
+                                        return true
+                                      })
+                                      .map(nodeId => (
+                                        <option key={nodeId} value={nodeId}>{nodeId}</option>
+                                      ))
+                                  }
+                                </select>
+                              </div>
+
+                              {/* Format Selector (rightmost) */}
+                              <div className="flex items-center gap-2">
+                                <span className="text-gray-500">Format:</span>
+                                <select
+                                  value={
+                                    message.showMarkdown === 'debug' ? 'debug' :
+                                    message.showMarkdown === true ? 'markdown' : 'raw'
+                                  }
+                                  onChange={(e) => {
+                                    const newValue = e.target.value === 'markdown' ? true : 
+                                                    e.target.value === 'debug' ? 'debug' : false
+                                    setMessages(prev => prev.map(msg => 
+                                      msg.id === message.id 
+                                        ? { ...msg, showMarkdown: newValue }
+                                        : msg
+                                    ))
+                                  }}
+                                  className="px-2 py-1 rounded bg-gray-100 border border-gray-300 text-gray-600 hover:bg-gray-200"
+                                >
+                                  {/* Conditionally show options based on selection and data availability */}
+                                  {(() => {
+                                    const isMultiData = (message.selectedNodeType === '(all)' || message.selectedNodeName === '(all)')
+                                    const nodeName = message.selectedNodeName || 'chat_response'
+                                    const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName]
+                                    const hasResponse = nodeData && (nodeData.response || nodeData.result || nodeData.output)
+                                    
+                                    if (isMultiData) {
+                                      // Only JSON available for multi-data
+                                      return <option value="debug">🔍 Debug JSON</option>
+                                    } else if (hasResponse) {
+                                      // All formats available for single node with response data
+                                      return (
+                                        <>
+                                          <option value="markdown">📝 Formatted</option>
+                                          <option value="raw">💻 Raw</option>
+                                          <option value="debug">🔍 Debug JSON</option>
+                                        </>
+                                      )
+                                    } else {
+                                      // Only JSON available if no response data
+                                      return <option value="debug">🔍 Debug JSON</option>
+                                    }
+                                  })()}
+                                </select>
+                              </div>
+                            </div>
                           </div>
                           
                           {/* Content Display */}
                           {message.showMarkdown === true ? (
                             <div className="prose prose-sm max-w-none prose-table:text-sm">
                               <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {message.content}
+                                {(() => {
+                                  // Show content from selected node if available
+                                  const nodeName = message.selectedNodeName || 'chat_response'
+                                  const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName]
+                                  const responseContent = nodeData?.response || nodeData?.result || nodeData?.output
+                                  return responseContent || message.content
+                                })()}
                               </ReactMarkdown>
+                            </div>
+                          ) : message.showMarkdown === 'debug' ? (
+                            <div className="bg-gray-900 text-green-400 p-3 rounded border font-mono text-xs overflow-x-auto">
+                              <div className="mb-2 text-yellow-400 font-bold">
+                                🔍 Debug: {message.selectedNodeType || 'output'} / {message.selectedNodeName || 'chat_response'}
+                              </div>
+                              {message.rawExecutionData ? (
+                                <pre className="whitespace-pre-wrap">
+                                  {(() => {
+                                    const nodeType = message.selectedNodeType || 'output'
+                                    const nodeName = message.selectedNodeName || 'chat_response'
+                                    
+                                    if (nodeType === '(all)' && nodeName === '(all)') {
+                                      // Show everything (current behavior)
+                                      return JSON.stringify(message.rawExecutionData, null, 2)
+                                    } else if (nodeType !== '(all)' && nodeName === '(all)') {
+                                      // Show all nodes of a specific type
+                                      const filteredNodes = Object.entries(message.rawExecutionData.finalOutputs || {})
+                                        .filter(([nodeId]) => {
+                                          if (nodeType === 'output') return nodeId.includes('output') || nodeId.includes('response') || nodeId === 'chat_response'
+                                          if (nodeType === 'input') return nodeId.includes('input')
+                                          if (nodeType === 'chat') return nodeId.includes('chat')
+                                          if (nodeType === 'processing') return nodeId.includes('processor') || nodeId.includes('concat') || nodeId.includes('transform')
+                                          return true
+                                        })
+                                        .reduce((acc, [nodeId, nodeData]) => ({ ...acc, [nodeId]: nodeData }), {})
+                                      return JSON.stringify(filteredNodes, null, 2)
+                                    } else {
+                                      // Show specific node
+                                      const specificNode = message.rawExecutionData.finalOutputs?.[nodeName]
+                                      return specificNode ? JSON.stringify(specificNode, null, 2) : `No data found for node: ${nodeName}`
+                                    }
+                                  })()}
+                                </pre>
+                              ) : (
+                                <div className="text-red-400">No raw execution data available</div>
+                              )}
                             </div>
                           ) : (
                             <pre className="whitespace-pre-wrap font-mono text-sm bg-gray-50 p-3 rounded border text-gray-800 overflow-x-auto">
-                              {message.content}
+                              {(() => {
+                                // Show content from selected node if available
+                                const nodeName = message.selectedNodeName || 'chat_response'
+                                const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName]
+                                const responseContent = nodeData?.response || nodeData?.result || nodeData?.output
+                                return responseContent || message.content
+                              })()}
                             </pre>
                           )}
                         </>

@@ -241,16 +241,210 @@ class TextConcatNode(BaseNode):
         super().__init__(spec)
         
     async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
-        text1 = context.get_input_value(node_data.node_id, "text1") or ""
-        text2 = context.get_input_value(node_data.node_id, "text2") or ""
-        text3 = context.get_input_value(node_data.node_id, "text3") or ""
+        text1 = context.get_input_value(node_data.node_id, "text1")
+        text2 = context.get_input_value(node_data.node_id, "text2")  
+        text3 = context.get_input_value(node_data.node_id, "text3")
         separator = node_data.parameters.get("separator", " ")
         
-        # Filter out empty texts
-        texts = [t for t in [text1, text2, text3] if t]
+        # Simple type conversion - let Python handle most conversions naturally
+        def to_string(value):
+            if value is None or value == "":
+                return ""
+            else:
+                return str(value)
+        
+        # Convert and filter out empty texts
+        texts = [to_string(t) for t in [text1, text2, text3] if to_string(t)]
         result = separator.join(texts)
         
         return {"output": result}
+
+
+class JsonExtractNode(BaseNode):
+    """Extract a field value from JSON/dict data."""
+    
+    NODE_TYPE = "json_extract"
+    
+    def __init__(self):
+        spec = NodeSpec(
+            node_type=self.NODE_TYPE,
+            display_name="JSON Extract",
+            description="Extract a specific field value from JSON/dict data",
+            category="Data Processing",
+            inputs=[
+                PortSpec(name="data", data_type=DataType.JSON, description="JSON object or dict"),
+                PortSpec(name="key", data_type=DataType.TEXT, description="Key to extract", required=False)
+            ],
+            outputs=[
+                PortSpec(name="value", data_type=DataType.TEXT, description="Extracted value as string"),
+                PortSpec(name="found", data_type=DataType.JSON, description="Whether key was found")
+            ],
+            parameters=[
+                ParameterSpec(
+                    name="key_path",
+                    data_type="string",
+                    default="",
+                    description="Dot-separated path to extract (e.g., 'user.name' or 'words')"
+                ),
+                ParameterSpec(
+                    name="default_value",
+                    data_type="string", 
+                    default="",
+                    description="Default value if key not found"
+                ),
+                ParameterSpec(
+                    name="stringify",
+                    data_type="boolean",
+                    default=True,
+                    description="Convert extracted value to string"
+                )
+            ]
+        )
+        super().__init__(spec)
+        
+    async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
+        data = context.get_input_value(node_data.node_id, "data")
+        key_input = context.get_input_value(node_data.node_id, "key")
+        
+        # Use input key if provided, otherwise parameter
+        key_path = key_input or node_data.parameters.get("key_path", "")
+        default_value = node_data.parameters.get("default_value", "")
+        stringify = node_data.parameters.get("stringify", True)
+        
+        if not data or not key_path:
+            return {
+                "value": default_value,
+                "found": {"success": False, "reason": "missing_data_or_key"}
+            }
+        
+        try:
+            # Handle dot-separated paths like "user.name" 
+            current_data = data
+            for key_part in key_path.split('.'):
+                if isinstance(current_data, dict) and key_part in current_data:
+                    current_data = current_data[key_part]
+                else:
+                    return {
+                        "value": default_value,
+                        "found": {"success": False, "reason": f"key_not_found: {key_part}"}
+                    }
+            
+            # Convert to string if requested
+            if stringify:
+                value = str(current_data)
+            else:
+                value = current_data
+                
+            return {
+                "value": value,
+                "found": {"success": True, "extracted": current_data}
+            }
+            
+        except Exception as e:
+            return {
+                "value": default_value,
+                "found": {"success": False, "reason": f"error: {str(e)}"}
+            }
+
+
+class JsonReplaceNode(BaseNode):
+    """Replace a field value in JSON/dict data."""
+    
+    NODE_TYPE = "json_replace"
+    
+    def __init__(self):
+        spec = NodeSpec(
+            node_type=self.NODE_TYPE,
+            display_name="JSON Replace",
+            description="Replace a specific field value in JSON/dict data",
+            category="Data Processing",
+            inputs=[
+                PortSpec(name="data", data_type=DataType.JSON, description="JSON object or dict to modify"),
+                PortSpec(name="key", data_type=DataType.TEXT, description="Key to replace", required=False),
+                PortSpec(name="value", data_type=DataType.ANY, description="New value to set")
+            ],
+            outputs=[
+                PortSpec(name="result", data_type=DataType.JSON, description="Modified JSON object"),
+                PortSpec(name="success", data_type=DataType.JSON, description="Whether replacement was successful")
+            ],
+            parameters=[
+                ParameterSpec(
+                    name="key_path",
+                    data_type="string",
+                    default="",
+                    description="Dot-separated path to replace (e.g., 'user.name' or 'content')"
+                ),
+                ParameterSpec(
+                    name="create_if_missing",
+                    data_type="boolean",
+                    default=True,
+                    description="Create the key path if it doesn't exist"
+                )
+            ]
+        )
+        super().__init__(spec)
+        
+    async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
+        data = context.get_input_value(node_data.node_id, "data")
+        key_input = context.get_input_value(node_data.node_id, "key")
+        new_value = context.get_input_value(node_data.node_id, "value")
+        
+        # Use input key if provided, otherwise parameter
+        key_path = key_input or node_data.parameters.get("key_path", "")
+        create_if_missing = node_data.parameters.get("create_if_missing", True)
+        
+        if not data or not key_path:
+            return {
+                "result": data,
+                "success": {"success": False, "reason": "missing_data_or_key"}
+            }
+        
+        try:
+            # Deep copy the data to avoid modifying original
+            import copy
+            result_data = copy.deepcopy(data)
+            
+            # Handle dot-separated paths like "user.name"
+            path_parts = key_path.split('.')
+            current_data = result_data
+            
+            # Navigate to the parent of the target key
+            for i, key_part in enumerate(path_parts[:-1]):
+                if isinstance(current_data, dict):
+                    if key_part not in current_data:
+                        if create_if_missing:
+                            current_data[key_part] = {}
+                        else:
+                            return {
+                                "result": data,
+                                "success": {"success": False, "reason": f"path_not_found: {key_part}"}
+                            }
+                    current_data = current_data[key_part]
+                else:
+                    return {
+                        "result": data,
+                        "success": {"success": False, "reason": f"invalid_path_type: {key_part}"}
+                    }
+            
+            # Set the final key
+            final_key = path_parts[-1]
+            if isinstance(current_data, dict):
+                current_data[final_key] = new_value
+                return {
+                    "result": result_data,
+                    "success": {"success": True, "replaced": key_path, "value": new_value}
+                }
+            else:
+                return {
+                    "result": data,
+                    "success": {"success": False, "reason": "target_not_dict"}
+                }
+                
+        except Exception as e:
+            return {
+                "result": data,
+                "success": {"success": False, "reason": f"error: {str(e)}"}
+            }
 
 
 class OutputNode(BaseNode):
@@ -307,6 +501,8 @@ BUILTIN_NODES = {
     "text_transform": TextTransformNode,
     "text_filter": TextFilterNode,
     "text_concat": TextConcatNode,
+    "json_extract": JsonExtractNode,
+    "json_replace": JsonReplaceNode,
     "output": OutputNode,
     **SMART_CHAT_NODES,  # Smart context-aware chat
     **IMMUTABLE_CHAT_NODES,  # Immutable content-addressable chat

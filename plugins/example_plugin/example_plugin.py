@@ -29,9 +29,14 @@ class ExampleProcessorNode(BaseNode):
                     description="Processed text output"
                 ),
                 PortSpec(
-                    name="length", 
+                    name="count", 
                     data_type=DataType.JSON, 
-                    description="Text length information"
+                    description="Numeric count (words, chars, etc.)"
+                ),
+                PortSpec(
+                    name="count_string", 
+                    data_type=DataType.TEXT, 
+                    description="Count as formatted string with prefix"
                 )
             ],
             parameters=[
@@ -66,29 +71,33 @@ class ExampleProcessorNode(BaseNode):
         if operation == "word_count":
             word_count = len(text.split())
             processed = f"{prefix}Word count: {word_count}"
-            length_info = {"words": word_count, "chars": len(text)}
+            count = word_count
             
         elif operation == "char_count":
             char_count = len(text)
             processed = f"{prefix}Character count: {char_count}" 
-            length_info = {"chars": char_count, "words": len(text.split())}
+            count = char_count
             
         elif operation == "reverse":
             processed = f"{prefix}{text[::-1]}"
-            length_info = {"original_length": len(text)}
+            count = len(text)
             
         elif operation == "shuffle":
             import random
             words = text.split()
             random.shuffle(words)
             processed = f"{prefix}{' '.join(words)}"
-            length_info = {"word_count": len(words)}
+            count = len(words)
             
         else:
             processed = f"{prefix}{text}"
-            length_info = {}
+            count = 0
             
+        # Create formatted string output using prefix
+        count_string = f"{prefix}{count}" if prefix else str(count)
+        
         return {
             "processed": processed,
-            "length": length_info
+            "count": count,
+            "count_string": count_string
         }

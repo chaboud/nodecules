@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
-import { Send, MessageSquare, RotateCcw, Bot, User, HelpCircle, ChevronDown, ChevronUp } from 'lucide-react'
+import { Send, MessageSquare, RotateCcw, Bot, User, HelpCircle, ChevronDown, ChevronUp, FileText, Eye } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { graphsApi } from '@/services/api'
 import type { Graph } from '@/types'
 
@@ -9,6 +11,7 @@ interface Message {
   type: 'user' | 'assistant'
   content: string
   timestamp: Date
+  showMarkdown?: boolean
 }
 
 interface ChatResponse {
@@ -81,6 +84,24 @@ export default function ChatInterface() {
     }
   }
 
+
+  // Helper function to detect if content likely contains markdown
+  const hasMarkdownContent = (content: string): boolean => {
+    const markdownIndicators = [
+      /#{1,6}\s+.+/,           // Headers
+      /\*\*.*\*\*/,            // Bold
+      /\*.*\*/,                // Italic  
+      /\|.*\|.*\|/,            // Tables
+      /```[\s\S]*```/,         // Code blocks
+      /`.*`/,                  // Inline code
+      /^\s*[-*+]\s+/m,         // Lists
+      /^\s*\d+\.\s+/m,         // Numbered lists
+      /\[.*\]\(.*\)/,          // Links
+    ]
+    
+    return markdownIndicators.some(regex => regex.test(content))
+  }
+
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || !selectedGraph || executeGraphMutation.isPending) return
 
@@ -138,7 +159,11 @@ export default function ChatInterface() {
             streamedContent += chunk.chunk
             setMessages(prev => prev.map(msg => 
               msg.id === aiMessageId 
-                ? { ...msg, content: streamedContent }
+                ? { 
+                    ...msg, 
+                    content: streamedContent,
+                    showMarkdown: hasMarkdownContent(streamedContent) ? true : undefined
+                  }
                 : msg
             ))
             setThinkingState({ isThinking: true, message: 'Streaming response...', startTime: Date.now() })
@@ -150,7 +175,11 @@ export default function ChatInterface() {
               const nodeResponse = chunk.outputs?.response || ''
               setMessages(prev => prev.map(msg => 
                 msg.id === aiMessageId 
-                  ? { ...msg, content: nodeResponse }
+                  ? { 
+                      ...msg, 
+                      content: nodeResponse,
+                      showMarkdown: hasMarkdownContent(nodeResponse) ? true : undefined
+                    }
                   : msg
               ))
             }
@@ -437,8 +466,50 @@ export default function ChatInterface() {
                       ? 'bg-blue-600 text-white'
                       : 'bg-white text-gray-900 border border-gray-200'
                   }`}>
-                    <p className="whitespace-pre-wrap">{message.content}</p>
-                    <p className={`text-xs mt-1 ${
+                    {/* Message Content */}
+                    <div className="mb-2">
+                      {message.type === 'assistant' && hasMarkdownContent(message.content) ? (
+                        <>
+                          {/* Format Selector */}
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs text-gray-500">Format:</span>
+                            <select
+                              value={message.showMarkdown === true ? 'markdown' : 'raw'}
+                              onChange={(e) => {
+                                const newValue = e.target.value === 'markdown'
+                                setMessages(prev => prev.map(msg => 
+                                  msg.id === message.id 
+                                    ? { ...msg, showMarkdown: newValue }
+                                    : msg
+                                ))
+                              }}
+                              className="text-xs px-2 py-1 rounded bg-gray-100 border border-gray-300 text-gray-600 hover:bg-gray-200"
+                            >
+                              <option value="markdown">📝 Formatted</option>
+                              <option value="raw">💻 Raw</option>
+                            </select>
+                          </div>
+                          
+                          {/* Content Display */}
+                          {message.showMarkdown === true ? (
+                            <div className="prose prose-sm max-w-none prose-table:text-sm">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {message.content}
+                              </ReactMarkdown>
+                            </div>
+                          ) : (
+                            <pre className="whitespace-pre-wrap font-mono text-sm bg-gray-50 p-3 rounded border text-gray-800 overflow-x-auto">
+                              {message.content}
+                            </pre>
+                          )}
+                        </>
+                      ) : (
+                        <p className="whitespace-pre-wrap">{message.content}</p>
+                      )}
+                    </div>
+                    
+                    {/* Timestamp */}
+                    <p className={`text-xs ${
                       message.type === 'user' ? 'text-blue-100' : 'text-gray-500'
                     }`}>
                       {message.timestamp.toLocaleTimeString()}

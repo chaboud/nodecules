@@ -106,7 +106,7 @@ function GraphEditorInner() {
         data: {
           nodeType: nodeData.node_type,
           parameters: nodeData.parameters || {},
-          label: nodeData.node_type,
+          label: nodeData.label || nodeData.node_type,
           description: nodeData.description,
         },
       }))
@@ -197,6 +197,7 @@ function GraphEditorInner() {
           position: node.position,
           parameters: node.data.parameters || {},
           description: node.data.description,
+          label: node.data.label,
         }
         return acc
       }, {} as Record<string, any>),
@@ -248,6 +249,7 @@ function GraphEditorInner() {
               position: node.position,
               parameters: node.data.parameters || {},
               description: node.data.description,
+              label: node.data.label,
             }
             return acc
           }, {} as Record<string, any>),

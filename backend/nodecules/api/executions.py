@@ -73,7 +73,9 @@ async def execute_graph(
                 node_id=node_data["node_id"],
                 node_type=node_data["node_type"],
                 position=node_data.get("position", {}),
-                parameters=node_data.get("parameters", {})
+                parameters=node_data.get("parameters", {}),
+                label=node_data.get("label"),
+                description=node_data.get("description")
             )
             
         edges = []
@@ -219,7 +221,9 @@ async def execute_graph_streaming(
                 node_id=node_data["node_id"],
                 node_type=node_data["node_type"],
                 position=node_data.get("position", {}),
-                parameters=node_data.get("parameters", {})
+                parameters=node_data.get("parameters", {}),
+                label=node_data.get("label"),
+                description=node_data.get("description")
             )
             
         edges = []

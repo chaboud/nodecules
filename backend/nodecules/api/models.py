@@ -12,6 +12,8 @@ class NodeDataRequest(BaseModel):
     node_type: str
     position: Dict[str, float] = Field(default_factory=dict)
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
+    label: Optional[str] = None
 
 
 class EdgeDataRequest(BaseModel):

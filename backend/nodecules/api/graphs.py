@@ -61,7 +61,9 @@ async def create_graph(
                 node_id=node_req.node_id,
                 node_type=node_req.node_type,
                 position=node_req.position,
-                parameters=node_req.parameters
+                parameters=node_req.parameters,
+                label=node_req.label,
+                description=node_req.description
             ).__dict__
             
         edges = []
@@ -142,7 +144,9 @@ async def update_graph(
                 node_id=node_req.node_id,
                 node_type=node_req.node_type,
                 position=node_req.position,
-                parameters=node_req.parameters
+                parameters=node_req.parameters,
+                label=node_req.label,
+                description=node_req.description
             ).__dict__
         db_graph.nodes = nodes
         

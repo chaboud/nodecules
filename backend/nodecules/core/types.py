@@ -78,6 +78,8 @@ class NodeData:
     node_type: str
     position: Dict[str, float] = field(default_factory=dict)
     parameters: Dict[str, Any] = field(default_factory=dict)
+    label: Optional[str] = None
+    description: Optional[str] = None
     
     def __post_init__(self):
         if not self.node_id:

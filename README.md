@@ -58,9 +58,10 @@ A basic node-based graph processing engine for building flexible AI-powered work
    - Backend API (port 8000)
    - Frontend web app (port 3000)
 
-3. **Initialize the database** (one-time setup):
+3. **Verify setup** (database initializes automatically):
    ```bash
-   docker-compose exec backend poetry run alembic upgrade head
+   # Check logs to ensure database initialization completed
+   docker-compose logs backend | grep -E "(Database initialization|✅|❌)"
    ```
 
 4. **Access the application**:
@@ -87,7 +88,7 @@ For development with hot reloading:
    ```bash
    cd backend
    poetry install
-   poetry run alembic upgrade head
+   python scripts/init_db.py  # Initialize database
    poetry run uvicorn nodecules.main:app --reload
    ```
 
@@ -105,6 +106,30 @@ For development with hot reloading:
 - `OPENAI_API_KEY`: For OpenAI GPT models  
 - `DATABASE_URL`: PostgreSQL connection (default works for Docker)
 - `REDIS_URL`: Redis connection (default works for Docker)
+
+## 🔧 Troubleshooting
+
+**Database Issues:**
+```bash
+# Manually initialize/fix database
+docker-compose exec backend poetry run python scripts/init_db.py
+
+# Reset database completely
+docker-compose down
+docker volume rm nodecules_postgres_data
+docker-compose up -d
+```
+
+**Missing Tables Error:**
+- The system now auto-creates missing tables on startup
+- If issues persist, run the manual database initialization above
+
+**Container Issues:**
+```bash
+# Rebuild containers with latest code
+docker-compose down
+docker-compose up -d --build
+```
 
 ## 🎯 Usage
 

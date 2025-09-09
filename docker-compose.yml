@@ -46,7 +46,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: uvicorn nodecules.main:app --host 0.0.0.0 --port 8000 --reload
+    command: >
+      sh -c "poetry run python scripts/init_db.py && 
+             uvicorn nodecules.main:app --host 0.0.0.0 --port 8000 --reload"
 
   # Frontend development server
   frontend:

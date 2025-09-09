@@ -1,6 +1,6 @@
-# Nodecules
+# Nodecules [under construction and **very** unstable]
 
-A complete node-based graph processing engine for building flexible AI-powered workflows with visual graph editing and conversational interfaces.
+A basic node-based graph processing engine for building flexible AI-powered workflows with visual graph editing and conversational interfaces.
 
 ## 🚀 Features
 
@@ -37,36 +37,74 @@ A complete node-based graph processing engine for building flexible AI-powered w
 
 ### Installation
 
+## 🚀 Quick Start (Docker - Recommended)
+
+**Prerequisites**: Docker and Docker Compose
+
 1. **Clone the repository**:
    ```bash
    git clone git@github.com:chaboud/nodecules.git
    cd nodecules
    ```
 
-2. **Start the database services**:
+2. **Start with Docker Compose**:
    ```bash
    docker-compose up -d
    ```
+   
+   This starts:
+   - PostgreSQL database (port 5432)
+   - Redis cache (port 6379) 
+   - Backend API (port 8000)
+   - Frontend web app (port 3000)
 
-3. **Set up the backend**:
+3. **Initialize the database** (one-time setup):
    ```bash
-   ./dev-setup.sh  # Creates venv and installs dependencies
-   cd backend
-   poetry shell
-   uvicorn nodecules.main:app --reload --host 0.0.0.0
+   docker-compose exec backend poetry run alembic upgrade head
    ```
 
-4. **Start the frontend** (in a new terminal):
+4. **Access the application**:
+   - **Web Interface**: http://localhost:3000
+   - **API Docs**: http://localhost:8000/docs
+   - **Backend API**: http://localhost:8000
+
+5. **Test it works**:
+   - Go to http://localhost:3000
+   - Click "New Graph" 
+   - Drag some nodes to create a simple workflow
+   - Click "Execute" to test
+
+## 🛠️ Development Setup
+
+For development with hot reloading:
+
+1. **Start infrastructure only**:
    ```bash
-   cd frontend
+   docker-compose up -d postgres redis
+   ```
+
+2. **Backend development**:
+   ```bash
+   cd backend
+   poetry install
+   poetry run alembic upgrade head
+   poetry run uvicorn nodecules.main:app --reload
+   ```
+
+3. **Frontend development** (new terminal):
+   ```bash
+   cd frontend  
    npm install
    npm run dev
    ```
 
-5. **Access the application**:
-   - Frontend: http://localhost:3000
-   - Backend API: http://localhost:8000
-   - API Docs: http://localhost:8000/docs
+## 🔧 Configuration
+
+**Environment Variables** (optional):
+- `ANTHROPIC_API_KEY`: For Claude AI integration
+- `OPENAI_API_KEY`: For OpenAI GPT models  
+- `DATABASE_URL`: PostgreSQL connection (default works for Docker)
+- `REDIS_URL`: Redis connection (default works for Docker)
 
 ## 🎯 Usage
 

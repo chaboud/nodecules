@@ -492,6 +492,7 @@ class OutputNode(BaseNode):
 # Import core chat nodes  
 from .smart_chat_node import SMART_CHAT_NODES
 from .immutable_chat_node import IMMUTABLE_CHAT_NODES
+from .context_nodes import CONTEXT_NODES
 # Import specialized nodes
 from .graph_nodes import GRAPH_NODES
 
@@ -506,5 +507,6 @@ BUILTIN_NODES = {
     "output": OutputNode,
     **SMART_CHAT_NODES,  # Smart context-aware chat
     **IMMUTABLE_CHAT_NODES,  # Immutable content-addressable chat
+    **CONTEXT_NODES,  # Context storage and key generation
     **GRAPH_NODES,  # Graph-as-node functionality
 }

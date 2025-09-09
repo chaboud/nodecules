@@ -79,7 +79,7 @@ class ImmutableChatNode(BaseNode):
                     data_type="select",
                     default="ollama",
                     description="LLM provider",
-                    constraints={"options": ["ollama"]}
+                    constraints={"options": ["ollama", "anthropic"]}
                 ),
                 ParameterSpec(
                     name="model",

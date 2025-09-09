@@ -5,7 +5,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.poetry]
 name = "nodecules"
 version = "0.1.0"
-description = "A Python node-based graph processing engine"
+description = "A basic node-based graph processing engine [under construction]"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 packages = [{include = "nodecules"}]
@@ -25,6 +25,7 @@ python-jose = {extras = ["cryptography"], version = "^3.3.0"}
 passlib = {extras = ["bcrypt"], version = "^1.7.0"}
 aiofiles = "^23.2.0"
 httpx = "^0.25.0"
+anthropic = "^0.25.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"

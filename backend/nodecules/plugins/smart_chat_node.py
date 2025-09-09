@@ -48,7 +48,7 @@ class SmartChatNode(BaseNode):
                     data_type="select",
                     default="ollama",
                     description="LLM provider",
-                    constraints={"options": ["ollama", "mock"]}
+                    constraints={"options": ["ollama", "anthropic", "mock"]}
                 ),
                 ParameterSpec(
                     name="model", 

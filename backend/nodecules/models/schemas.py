@@ -99,3 +99,18 @@ class User(Base):
     is_admin = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ContextStorage(Base):
+    """Context storage for conversation continuity."""
+    
+    __tablename__ = "context_storage"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    context_key = Column(String(255), nullable=False, unique=True, index=True)
+    context_data = Column(JSON, nullable=False, default=dict)
+    meta_data = Column(JSON, default=dict)  # Store provider info, model, etc.
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    expires_at = Column(DateTime)  # Optional expiration
+    created_by = Column(String(255))  # User ID

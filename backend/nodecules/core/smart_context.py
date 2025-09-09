@@ -314,6 +314,173 @@ class MockAdapter(BaseProviderAdapter):
         return {"messages": messages}
 
 
+class AnthropicAdapter(BaseProviderAdapter):
+    """Anthropic Claude adapter."""
+    
+    def __init__(self):
+        super().__init__()
+        try:
+            import anthropic
+            self.anthropic = anthropic
+        except ImportError:
+            raise ImportError("anthropic package required for Anthropic support. Install with: pip install anthropic")
+    
+    async def generate_with_context(
+        self, 
+        context_data: Dict[str, Any], 
+        new_message: str,
+        model: str = "claude-3-haiku-20240307",
+        temperature: float = 0.7,
+        max_tokens: int = 4000,
+        **kwargs
+    ) -> tuple[str, Dict[str, Any]]:
+        """Generate response using Anthropic API."""
+        import os
+        
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable is required for Anthropic support")
+        
+        client = self.anthropic.Anthropic(api_key=api_key)
+        
+        # Get existing messages
+        messages = context_data.get("messages", [])
+        
+        # Separate system message from conversation messages
+        system_prompt = None
+        conversation_messages = []
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                conversation_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+        
+        # Add new user message
+        conversation_messages.append({
+            "role": "user",
+            "content": new_message
+        })
+        
+        try:
+            # Create message
+            response = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_prompt or "You are a helpful AI assistant.",
+                messages=conversation_messages
+            )
+            
+            # Extract response text
+            response_text = ""
+            for content in response.content:
+                if hasattr(content, 'text'):
+                    response_text += content.text
+                else:
+                    response_text += str(content)
+            
+            # Update context with new exchange
+            updated_messages = messages.copy()
+            updated_messages.extend([
+                {"role": "user", "content": new_message},
+                {"role": "assistant", "content": response_text}
+            ])
+            
+            return response_text, {
+                "messages": updated_messages,
+                "provider_type": "full_history"
+            }
+            
+        except Exception as e:
+            raise RuntimeError(f"Anthropic API error: {str(e)}")
+    
+    async def generate_with_context_streaming(
+        self,
+        context_data: Dict[str, Any], 
+        new_message: str,
+        model: str = "claude-3-haiku-20240307",
+        temperature: float = 0.7,
+        max_tokens: int = 4000,
+        **kwargs
+    ):
+        """Generate streaming response using Anthropic API."""
+        import os
+        
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable is required for Anthropic support")
+        
+        client = self.anthropic.Anthropic(api_key=api_key)
+        
+        # Get existing messages
+        messages = context_data.get("messages", [])
+        
+        # Separate system message from conversation messages
+        system_prompt = None
+        conversation_messages = []
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                conversation_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+        
+        # Add new user message
+        conversation_messages.append({
+            "role": "user",
+            "content": new_message
+        })
+        
+        try:
+            # Create streaming message
+            full_response = ""
+            with client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_prompt or "You are a helpful AI assistant.",
+                messages=conversation_messages
+            ) as stream:
+                for text in stream.text_stream:
+                    full_response += text
+                    yield text
+            
+            # Update context with complete exchange - yield as final result
+            updated_messages = messages.copy()
+            updated_messages.extend([
+                {"role": "user", "content": new_message},
+                {"role": "assistant", "content": full_response}
+            ])
+            
+            # Return updated context as the final yielded value (special marker)
+            yield {
+                "messages": updated_messages,
+                "provider_type": "full_history",
+                "_context_update": True
+            }
+            
+        except Exception as e:
+            raise RuntimeError(f"Anthropic API streaming error: {str(e)}")
+    
+    def create_new_context(self, system_prompt: str = None) -> Dict[str, Any]:
+        """Create new conversation context."""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        return {
+            "messages": messages,
+            "provider_type": "full_history"
+        }
+
+
 class SmartContextManager:
     """Context manager that adapts to provider capabilities."""
     
@@ -324,8 +491,8 @@ class SmartContextManager:
         # Provider adapters
         self.adapters = {
             "ollama": OllamaAdapter(),
+            "anthropic": AnthropicAdapter(),
             "mock": MockAdapter(),
-            # TODO: Add Bedrock, Anthropic adapters when needed
         }
     
     def _get_cache_key(self, context_id: str) -> str:

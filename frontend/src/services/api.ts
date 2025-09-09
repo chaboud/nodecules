@@ -55,6 +55,24 @@ export const graphsApi = {
     const response = await api.get(`/graphs/${id}/schema`)
     return response.data
   },
+
+  async exportGraph(id: string): Promise<Blob> {
+    const response = await api.get(`/graphs/${id}/export`, {
+      responseType: 'blob',
+    })
+    return response.data
+  },
+
+  async importGraph(file: File): Promise<Graph> {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post('/graphs/import', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return response.data
+  },
 }
 
 export const executionsApi = {

@@ -1,9 +1,11 @@
 """API routes for graph management."""
 
 import logging
+import json
 from typing import List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from ..models.database import get_database
@@ -343,4 +345,110 @@ async def execute_graph(
             execution_id=execution_id,
             status="failed",
             errors={"system": str(e)}
+        )
+
+
+@router.get("/{graph_identifier}/export")
+async def export_graph(
+    graph_identifier: str,
+    db: Session = Depends(get_database)
+):
+    """Export graph as JSON file."""
+    graph = resolve_graph_by_id_or_name(graph_identifier, db)
+    
+    # Create standardized JSON export format
+    export_data = {
+        "nodecules_version": "1.0",
+        "graph": {
+            "name": graph.name,
+            "description": graph.description,
+            "metadata": graph.meta_data or {},
+            "nodes": graph.nodes,
+            "edges": graph.edges
+        },
+        "exported_at": graph.updated_at.isoformat(),
+        "original_id": str(graph.id)
+    }
+    
+    # Return as downloadable JSON
+    filename = f"{graph.name.replace(' ', '_').lower()}.nodecules.json"
+    return JSONResponse(
+        content=export_data,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Content-Type": "application/json"
+        }
+    )
+
+
+@router.post("/import")
+async def import_graph(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_database)
+):
+    """Import graph from JSON file."""
+    if not file.filename.endswith(('.json', '.nodecules.json')):
+        raise HTTPException(
+            status_code=400, 
+            detail="File must be a JSON file"
+        )
+    
+    try:
+        # Read and parse JSON content
+        content = await file.read()
+        import_data = json.loads(content)
+        
+        # Validate format
+        if "graph" not in import_data:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file format: missing 'graph' field"
+            )
+        
+        graph_data = import_data["graph"]
+        
+        # Check for required fields
+        if not all(key in graph_data for key in ["name", "nodes", "edges"]):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid graph format: missing required fields"
+            )
+        
+        # Create new graph from imported data
+        # Add "(Imported)" suffix if name already exists
+        original_name = graph_data["name"]
+        name = original_name
+        counter = 1
+        
+        while db.query(Graph).filter(Graph.name == name).first():
+            name = f"{original_name} (Imported {counter})"
+            counter += 1
+        
+        # Create database record
+        db_graph = Graph(
+            name=name,
+            description=graph_data.get("description", ""),
+            nodes=graph_data["nodes"],
+            edges=graph_data["edges"],
+            meta_data=graph_data.get("metadata", {}),
+            created_by="import"
+        )
+        
+        db.add(db_graph)
+        db.commit()
+        db.refresh(db_graph)
+        
+        logger.info(f"Imported graph {db_graph.id}: {db_graph.name}")
+        return GraphResponse.model_validate(db_graph)
+        
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid JSON file"
+        )
+    except Exception as e:
+        logger.error(f"Failed to import graph: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Import failed: {str(e)}"
         )

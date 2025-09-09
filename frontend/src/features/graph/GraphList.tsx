@@ -1,14 +1,25 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { Plus, Play, Calendar, FileText, MoreVertical, Copy, Edit3, Trash2 } from 'lucide-react'
+import { Plus, Play, Calendar, FileText, MoreVertical, Copy, Edit3, Trash2, Download, Upload } from 'lucide-react'
 import { graphsApi } from '@/services/api'
 import type { Graph } from '@/types'
 
 export default function GraphList() {
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const queryClient = useQueryClient()
+
   const { data: graphs, isLoading, error } = useQuery({
     queryKey: ['graphs'],
     queryFn: graphsApi.list,
+  })
+
+  const importMutation = useMutation({
+    mutationFn: graphsApi.importGraph,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['graphs'] })
+      setShowImportDialog(false)
+    },
   })
 
   if (isLoading) {
@@ -33,13 +44,22 @@ export default function GraphList() {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-2xl font-bold text-gray-900">Your Graphs</h2>
-          <Link
-            to="/graph"
-            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Plus className="h-4 w-4 mr-2" />
-            New Graph
-          </Link>
+          <div className="flex space-x-3">
+            <button
+              onClick={() => setShowImportDialog(true)}
+              className="inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+            >
+              <Upload className="h-4 w-4 mr-2" />
+              Import Graph
+            </button>
+            <Link
+              to="/graph"
+              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              New Graph
+            </Link>
+          </div>
         </div>
 
         {/* Graphs grid */}
@@ -64,6 +84,15 @@ export default function GraphList() {
           </div>
         )}
       </div>
+
+      {/* Import Dialog */}
+      {showImportDialog && (
+        <ImportDialog
+          onClose={() => setShowImportDialog(false)}
+          onImport={(file) => importMutation.mutate(file)}
+          isLoading={importMutation.isPending}
+        />
+      )}
     </div>
   )
 }
@@ -116,6 +145,23 @@ function GraphCard({ graph }: { graph: Graph }) {
     } else {
       setIsRenaming(false)
       setNewName(graph.name)
+    }
+  }
+
+  const handleExport = async () => {
+    try {
+      const blob = await graphsApi.exportGraph(graph.id)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${graph.name.replace(/\s+/g, '_').toLowerCase()}.nodecules.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      setShowMenu(false)
+    } catch (error) {
+      alert('Failed to export graph')
     }
   }
   
@@ -189,6 +235,14 @@ function GraphCard({ graph }: { graph: Graph }) {
                     <Copy className="h-4 w-4 mr-3" />
                     {copyMutation.isPending ? 'Copying...' : 'Duplicate'}
                   </button>
+
+                  <button
+                    onClick={handleExport}
+                    className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  >
+                    <Download className="h-4 w-4 mr-3" />
+                    Export JSON
+                  </button>
                   
                   <button
                     onClick={handleDelete}
@@ -232,6 +286,98 @@ function GraphCard({ graph }: { graph: Graph }) {
           onClick={() => setShowMenu(false)}
         />
       )}
+    </div>
+  )
+}
+
+function ImportDialog({ 
+  onClose, 
+  onImport, 
+  isLoading 
+}: { 
+  onClose: () => void
+  onImport: (file: File) => void
+  isLoading: boolean 
+}) {
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      onImport(file)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    const file = e.dataTransfer.files[0]
+    if (file && (file.name.endsWith('.json') || file.name.endsWith('.nodecules.json'))) {
+      onImport(file)
+    }
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(true)
+  }
+
+  const handleDragLeave = () => {
+    setDragOver(false)
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+      <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-gray-900">Import Graph</h3>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-gray-600"
+            disabled={isLoading}
+          >
+            ×
+          </button>
+        </div>
+
+        <div
+          className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+            dragOver
+              ? 'border-blue-400 bg-blue-50'
+              : 'border-gray-300 hover:border-gray-400'
+          }`}
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+        >
+          <Upload className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+          <p className="text-gray-600 mb-4">
+            Drag and drop a .json or .nodecules.json file here, or click to browse
+          </p>
+          
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,.nodecules.json"
+            onChange={handleFileChange}
+            className="hidden"
+            disabled={isLoading}
+          />
+          
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isLoading}
+            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          >
+            {isLoading ? 'Importing...' : 'Select File'}
+          </button>
+        </div>
+
+        <p className="text-sm text-gray-500 mt-4">
+          Supported formats: JSON (.json), Nodecules Graph (.nodecules.json)
+        </p>
+      </div>
     </div>
   )
 }

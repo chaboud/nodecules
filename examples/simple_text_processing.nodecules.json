@@ -1,0 +1,66 @@
+{
+  "nodecules_version": "1.0",
+  "graph": {
+    "name": "Simple Text Processing",
+    "description": "A basic text processing pipeline with input, transformation, and output nodes",
+    "metadata": {
+      "category": "text-processing",
+      "tags": ["example", "basic", "text"],
+      "author": "Nodecules Team",
+      "created_for": "demonstration"
+    },
+    "nodes": {
+      "input_1": {
+        "node_id": "input_1",
+        "node_type": "input",
+        "position": {"x": 100, "y": 100},
+        "parameters": {
+          "label": "Text Input",
+          "data_type": "text",
+          "description": "Enter your text to process"
+        },
+        "label": "Text Input",
+        "description": "Source text for processing"
+      },
+      "transform_1": {
+        "node_id": "transform_1", 
+        "node_type": "text_transform",
+        "position": {"x": 300, "y": 100},
+        "parameters": {
+          "operation": "uppercase",
+          "label": "Make Uppercase"
+        },
+        "label": "Make Uppercase",
+        "description": "Convert text to uppercase"
+      },
+      "output_1": {
+        "node_id": "output_1",
+        "node_type": "output", 
+        "position": {"x": 500, "y": 100},
+        "parameters": {
+          "label": "Processed Text"
+        },
+        "label": "Processed Text",
+        "description": "Final processed output"
+      }
+    },
+    "edges": [
+      {
+        "edge_id": "input_1->transform_1",
+        "source_node": "input_1",
+        "source_port": "output",
+        "target_node": "transform_1", 
+        "target_port": "text"
+      },
+      {
+        "edge_id": "transform_1->output_1",
+        "source_node": "transform_1",
+        "source_port": "result",
+        "target_node": "output_1",
+        "target_port": "input"
+      }
+    ]
+  },
+  "exported_at": "2024-09-09T12:00:00.000Z",
+  "original_id": "example-graph-id"
+}

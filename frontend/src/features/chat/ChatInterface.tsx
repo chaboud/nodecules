@@ -135,13 +135,19 @@ export default function ChatInterface() {
       // Always use streaming execution - handles both streaming and non-streaming graphs
       setThinkingState({ isThinking: true, message: 'Starting...', startTime: Date.now() })
       
-      // Create placeholder message for streaming
+      // Create placeholder message for streaming with basic debug data
       const aiMessageId = (Date.now() + 1).toString()
       const aiMessage: Message = {
         id: aiMessageId,
         type: 'assistant',
         content: '',
-        timestamp: new Date()
+        timestamp: new Date(),
+        rawExecutionData: {
+          inputs,
+          allChunks: [],
+          graphId: selectedGraph,
+          status: 'streaming'
+        }
       }
       setMessages(prev => [...prev, aiMessage])
 
@@ -199,6 +205,7 @@ export default function ChatInterface() {
           } else if (chunk.type === 'execution_complete') {
             // Execution finished
             finalOutputs = chunk.outputs
+            console.log('Execution complete - setting rawExecutionData:', { finalOutputs, allChunks })
             setThinkingState({ isThinking: false, message: '' })
             
             // Extract the final response from the appropriate output node
@@ -226,7 +233,7 @@ export default function ChatInterface() {
                 ? { 
                     ...msg,
                     content: finalResponse,
-                    showMarkdown: hasMarkdownContent(finalResponse) ? true : true, // Default to formatted always
+                    showMarkdown: hasMarkdownContent(finalResponse) ? true : true, // Default to formatted for normal use
                     selectedNodeType: 'output', // Default to output nodes
                     selectedNodeName: 'chat_response', // Default to chat_response
                     rawExecutionData: {
@@ -699,6 +706,9 @@ export default function ChatInterface() {
                             <div className="bg-gray-900 text-green-400 p-3 rounded border font-mono text-xs overflow-x-auto">
                               <div className="mb-2 text-yellow-400 font-bold">
                                 🔍 Debug: {message.selectedNodeType || 'output'} / {message.selectedNodeName || 'chat_response'}
+                                {message.rawExecutionData?.status && (
+                                  <span className="ml-2 text-xs text-blue-400">({message.rawExecutionData.status})</span>
+                                )}
                               </div>
                               {message.rawExecutionData ? (
                                 <pre className="whitespace-pre-wrap">

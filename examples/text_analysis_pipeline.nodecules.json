@@ -1,0 +1,124 @@
+{
+  "nodecules_version": "1.0",
+  "graph": {
+    "name": "Text Analysis Pipeline",
+    "description": "Multi-step text processing with filtering, transformation, and JSON extraction",
+    "metadata": {
+      "category": "text-processing",
+      "tags": ["text", "analysis", "pipeline", "json"],
+      "author": "Nodecules Team",
+      "difficulty": "intermediate"
+    },
+    "nodes": {
+      "raw_text": {
+        "node_id": "raw_text",
+        "node_type": "input",
+        "position": {"x": 50, "y": 150},
+        "parameters": {
+          "label": "Raw Text",
+          "data_type": "text",
+          "value": "Hello WORLD! This is a SAMPLE text with VARIOUS formatting and some numbers: 12345"
+        },
+        "label": "Raw Text Input",
+        "description": "Enter text to analyze"
+      },
+      "filter_step": {
+        "node_id": "filter_step",
+        "node_type": "text_filter",
+        "position": {"x": 200, "y": 150},
+        "parameters": {
+          "pattern": "[A-Z]+",
+          "operation": "extract_matches"
+        },
+        "label": "Extract Uppercase",
+        "description": "Find all uppercase words"
+      },
+      "transform_step": {
+        "node_id": "transform_step",
+        "node_type": "text_transform",
+        "position": {"x": 350, "y": 150},
+        "parameters": {
+          "operation": "lowercase"
+        },
+        "label": "To Lowercase",
+        "description": "Convert to lowercase"
+      },
+      "process_example": {
+        "node_id": "process_example",
+        "node_type": "example_processor",
+        "position": {"x": 500, "y": 150},
+        "parameters": {
+          "processing_type": "word_count"
+        },
+        "label": "Count Words",
+        "description": "Process and count words"
+      },
+      "create_summary": {
+        "node_id": "create_summary",
+        "node_type": "text_concat",
+        "position": {"x": 650, "y": 200},
+        "parameters": {
+          "separator": " | "
+        },
+        "label": "Create Summary",
+        "description": "Combine results"
+      },
+      "final_output": {
+        "node_id": "final_output",
+        "node_type": "output",
+        "position": {"x": 800, "y": 150},
+        "parameters": {
+          "label": "Analysis Results"
+        },
+        "label": "Final Results",
+        "description": "Combined analysis output"
+      }
+    },
+    "edges": [
+      {
+        "edge_id": "raw_to_filter",
+        "source_node": "raw_text",
+        "source_port": "output",
+        "target_node": "filter_step",
+        "target_port": "text"
+      },
+      {
+        "edge_id": "filter_to_transform",
+        "source_node": "filter_step",
+        "source_port": "result",
+        "target_node": "transform_step",
+        "target_port": "text"
+      },
+      {
+        "edge_id": "transform_to_process",
+        "source_node": "transform_step",
+        "source_port": "result",
+        "target_node": "process_example",
+        "target_port": "input"
+      },
+      {
+        "edge_id": "processed_to_summary1",
+        "source_node": "process_example",
+        "source_port": "processed",
+        "target_node": "create_summary",
+        "target_port": "text1"
+      },
+      {
+        "edge_id": "count_to_summary2",
+        "source_node": "process_example",
+        "source_port": "count_string",
+        "target_node": "create_summary",
+        "target_port": "text2"
+      },
+      {
+        "edge_id": "summary_to_output",
+        "source_node": "create_summary",
+        "source_port": "result",
+        "target_node": "final_output",
+        "target_port": "input"
+      }
+    ]
+  },
+  "exported_at": "2025-09-09T07:20:00.000Z",
+  "original_id": "text-analysis-example"
+}

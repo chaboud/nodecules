@@ -58,6 +58,35 @@ class PluginLoader:
                             
         return plugins
         
+    def auto_discover_plugins(self) -> List[dict]:
+        """Auto-discover Python files containing BaseNode subclasses without requiring manifests."""
+        auto_plugins = []
+        
+        for plugin_dir in self.plugin_dirs:
+            if not os.path.exists(plugin_dir):
+                continue
+                
+            # Scan for Python files directly in plugin directories
+            for root, dirs, files in os.walk(plugin_dir):
+                for file in files:
+                    if file.endswith('.py') and not file.startswith('_'):
+                        file_path = os.path.join(root, file)
+                        
+                        # Skip if this is part of a YAML-based plugin
+                        plugin_folder = os.path.dirname(file_path)
+                        if os.path.exists(os.path.join(plugin_folder, "plugin.yaml")):
+                            continue
+                            
+                        try:
+                            # Try to load the module and check for BaseNode classes
+                            plugin_info = self._inspect_python_file(file_path)
+                            if plugin_info and plugin_info['node_classes']:
+                                auto_plugins.append(plugin_info)
+                        except Exception as e:
+                            logger.debug(f"Could not auto-discover plugin from {file_path}: {e}")
+                            
+        return auto_plugins
+        
     def load_plugin(self, manifest: PluginManifest, plugin_dir: str) -> None:
         """Load a single plugin."""
         try:
@@ -95,8 +124,28 @@ class PluginLoader:
             logger.error(f"Failed to load plugin {manifest.name}: {e}")
             raise
             
+    def load_auto_discovered_plugin(self, plugin_info: dict) -> None:
+        """Load an auto-discovered plugin."""
+        try:
+            # Register the plugin
+            self.loaded_plugins[plugin_info['name']] = plugin_info
+            
+            # Register node classes
+            for node_type, node_class in plugin_info['node_classes'].items():
+                if node_type in self.node_classes:
+                    logger.warning(f"Node type '{node_type}' from auto-discovered plugin '{plugin_info['name']}' conflicts with existing registration")
+                else:
+                    self.node_classes[node_type] = node_class
+                    
+            logger.info(f"Auto-discovered plugin: {plugin_info['display_name']} with {len(plugin_info['node_classes'])} node types")
+            
+        except Exception as e:
+            logger.error(f"Failed to load auto-discovered plugin {plugin_info['name']}: {e}")
+            raise
+    
     def load_all_plugins(self) -> None:
-        """Discover and load all plugins."""
+        """Discover and load all plugins (both YAML-based and auto-discovered)."""
+        # Load YAML-based plugins first
         plugins = self.discover_plugins()
         
         for manifest in plugins:
@@ -113,6 +162,14 @@ class PluginLoader:
                     self.load_plugin(manifest, plugin_dir)
                 except Exception as e:
                     logger.error(f"Failed to load plugin {manifest.name}: {e}")
+                    
+        # Then load auto-discovered plugins
+        auto_plugins = self.auto_discover_plugins()
+        for plugin_info in auto_plugins:
+            try:
+                self.load_auto_discovered_plugin(plugin_info)
+            except Exception as e:
+                logger.error(f"Failed to load auto-discovered plugin {plugin_info['name']}: {e}")
                     
     def get_node_class(self, node_type: str) -> Optional[Type[BaseNode]]:
         """Get a node class by type."""
@@ -166,6 +223,43 @@ class PluginLoader:
                 node_classes[node_type] = obj
                 
         return node_classes
+        
+    def _inspect_python_file(self, file_path: str) -> Optional[dict]:
+        """Inspect a Python file to see if it contains BaseNode subclasses."""
+        try:
+            # Create a unique module name based on the file path
+            module_name = f"auto_plugin_{Path(file_path).stem}_{hash(file_path) % 10000}"
+            
+            # Load the module
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            if spec is None or spec.loader is None:
+                return None
+                
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            # Extract node classes
+            node_classes = self._extract_node_classes(module)
+            
+            if not node_classes:
+                return None
+                
+            # Create plugin info for auto-discovered plugin
+            file_name = Path(file_path).stem
+            return {
+                'name': f"auto_{file_name}",
+                'file_path': file_path,
+                'module': module,
+                'node_classes': node_classes,
+                'display_name': f"Auto-discovered: {file_name}",
+                'description': f"Auto-discovered plugin from {file_path}",
+                'is_auto_discovered': True
+            }
+            
+        except Exception as e:
+            # This is expected for files that don't contain valid node classes
+            logger.debug(f"Failed to inspect {file_path}: {e}")
+            return None
 
 
 class PluginManager:
@@ -181,7 +275,12 @@ class PluginManager:
         """Initialize the plugin system."""
         logger.info("Initializing plugin system...")
         self.loader.load_all_plugins()
-        logger.info(f"Loaded {len(self.loader.loaded_plugins)} plugins with {len(self.loader.node_classes)} node types")
+        
+        # Count different types of plugins
+        yaml_plugins = sum(1 for p in self.loader.loaded_plugins.values() if not p.get('is_auto_discovered', False))
+        auto_plugins = sum(1 for p in self.loader.loaded_plugins.values() if p.get('is_auto_discovered', False))
+        
+        logger.info(f"Loaded {len(self.loader.loaded_plugins)} plugins ({yaml_plugins} YAML-based, {auto_plugins} auto-discovered) with {len(self.loader.node_classes)} node types")
         
     def get_node_registry(self) -> Dict[str, Type[BaseNode]]:
         """Get the complete node registry for the execution engine."""

@@ -1,0 +1,130 @@
+{
+  "nodecules_version": "1.0",
+  "graph": {
+    "name": "Claude Chat with Context Storage",
+    "description": "Advanced chat with Claude using explicit context management for conversation continuity",
+    "metadata": {
+      "category": "ai-chat",
+      "tags": ["claude", "context", "chat", "anthropic"],
+      "author": "Nodecules Team",
+      "requires_api_key": "ANTHROPIC_API_KEY"
+    },
+    "nodes": {
+      "user_input": {
+        "node_id": "user_input",
+        "node_type": "input",
+        "position": {"x": 50, "y": 100},
+        "parameters": {
+          "label": "Your Message",
+          "data_type": "text",
+          "value": "Hello! Tell me about quantum computing."
+        },
+        "label": "Message Input",
+        "description": "Enter your message to Claude"
+      },
+      "context_key_gen": {
+        "node_id": "context_key_gen",
+        "node_type": "generate_random_key",
+        "position": {"x": 50, "y": 200},
+        "parameters": {
+          "prefix": "chat_",
+          "key_format": "alphanumeric",
+          "key_length": 8
+        },
+        "label": "Generate Context Key",
+        "description": "Creates unique key for this conversation"
+      },
+      "retrieve_context": {
+        "node_id": "retrieve_context",
+        "node_type": "context_retrieve",
+        "position": {"x": 250, "y": 200},
+        "parameters": {
+          "default_context": {"messages": []},
+          "cleanup_expired": true
+        },
+        "label": "Get Conversation History",
+        "description": "Retrieves existing conversation context"
+      },
+      "claude_chat": {
+        "node_id": "claude_chat",
+        "node_type": "smart_chat",
+        "position": {"x": 450, "y": 150},
+        "parameters": {
+          "provider": "anthropic",
+          "model": "claude-3-haiku-20240307",
+          "system_prompt": "You are Claude, a helpful AI assistant created by Anthropic. Be conversational and helpful.",
+          "temperature": 0.7
+        },
+        "label": "Claude AI Chat",
+        "description": "Chat with Claude AI"
+      },
+      "store_context": {
+        "node_id": "store_context",
+        "node_type": "context_store",
+        "position": {"x": 650, "y": 200},
+        "parameters": {
+          "expires_hours": 24,
+          "overwrite": true
+        },
+        "label": "Save Conversation",
+        "description": "Saves updated conversation context"
+      },
+      "response_output": {
+        "node_id": "response_output",
+        "node_type": "output",
+        "position": {"x": 650, "y": 100},
+        "parameters": {
+          "label": "Claude's Response"
+        },
+        "label": "AI Response",
+        "description": "Claude's response to your message"
+      }
+    },
+    "edges": [
+      {
+        "edge_id": "key_to_retrieve",
+        "source_node": "context_key_gen",
+        "source_port": "random_key",
+        "target_node": "retrieve_context",
+        "target_port": "context_key"
+      },
+      {
+        "edge_id": "message_to_claude",
+        "source_node": "user_input",
+        "source_port": "output",
+        "target_node": "claude_chat",
+        "target_port": "message"
+      },
+      {
+        "edge_id": "context_to_claude",
+        "source_node": "retrieve_context",
+        "source_port": "context_data",
+        "target_node": "claude_chat",
+        "target_port": "context_id"
+      },
+      {
+        "edge_id": "response_to_output",
+        "source_node": "claude_chat",
+        "source_port": "response",
+        "target_node": "response_output",
+        "target_port": "input"
+      },
+      {
+        "edge_id": "key_to_store",
+        "source_node": "context_key_gen",
+        "source_port": "random_key",
+        "target_node": "store_context",
+        "target_port": "context_key"
+      },
+      {
+        "edge_id": "updated_context_to_store",
+        "source_node": "claude_chat",
+        "source_port": "context_id",
+        "target_node": "store_context",
+        "target_port": "context_data"
+      }
+    ]
+  },
+  "exported_at": "2025-09-09T07:20:00.000Z",
+  "original_id": "claude-context-example"
+}

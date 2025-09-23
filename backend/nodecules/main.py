@@ -30,8 +30,13 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up nodecules...")
     
-    # Initialize plugin system
-    plugin_manager = PluginManager(["./plugins"])
+    # Initialize plugin system with multiple plugin directories
+    plugin_dirs = [
+        "./plugins",                    # Backend-local plugins
+        "../plugins",                   # Root-level plugins directory
+        "/app/plugins"                  # Docker container plugins mount
+    ]
+    plugin_manager = PluginManager(plugin_dirs)
     plugin_manager.initialize()
     
     # Initialize node registry with built-in nodes

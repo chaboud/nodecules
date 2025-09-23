@@ -71,8 +71,8 @@ A basic node-based graph processing engine for building flexible AI-powered work
 
 5. **Test it works**:
    - Go to http://localhost:3000
-   - Click "New Graph" 
-   - Drag some nodes to create a simple workflow
+   - Click "Import Graph" (green button)
+   - Import `/examples/simple_text_processing.nodecules.json`
    - Click "Execute" to test
 
 ## 🛠️ Development Setup
@@ -228,6 +228,12 @@ nodecules/
 
 ### Adding Custom Nodes
 
+**Auto-Discovery (Recommended)**:
+1. Drop any `.py` file with `BaseNode` subclasses into the `plugins/` directory
+2. Restart the backend - nodes are automatically discovered and loaded
+3. No configuration files required!
+
+**YAML-Based Plugins (For complex plugins)**:
 1. Create a plugin directory in `plugins/`
 2. Implement node class extending `BaseNode`
 3. Define node specification with inputs/outputs/parameters

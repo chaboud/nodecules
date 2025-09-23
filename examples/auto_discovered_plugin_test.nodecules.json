@@ -1,0 +1,82 @@
+{
+  "nodecules_version": "1.0",
+  "graph": {
+    "name": "Auto-Discovered Plugin Test",
+    "description": "Test graph demonstrating auto-discovered plugin functionality",
+    "metadata": {
+      "category": "plugin-testing",
+      "tags": ["auto-discovery", "custom-nodes", "test"],
+      "author": "Nodecules Team",
+      "difficulty": "intermediate"
+    },
+    "nodes": {
+      "test_input": {
+        "node_id": "test_input",
+        "node_type": "input",
+        "position": {"x": 50, "y": 150},
+        "parameters": {
+          "label": "Test Text",
+          "data_type": "text",
+          "value": "Hello World from auto-discovered plugin"
+        },
+        "label": "Test Input",
+        "description": "Text to process with custom node"
+      },
+      "custom_processor": {
+        "node_id": "custom_processor",
+        "node_type": "example_processor",
+        "position": {"x": 250, "y": 150},
+        "parameters": {
+          "processing_type": "word_count"
+        },
+        "label": "Custom Processor",
+        "description": "Auto-discovered custom processing node"
+      },
+      "text_formatter": {
+        "node_id": "text_formatter",
+        "node_type": "simple_text_processor",
+        "position": {"x": 450, "y": 150},
+        "parameters": {
+          "operation": "exclamation"
+        },
+        "label": "Text Formatter",
+        "description": "Another auto-discovered node"
+      },
+      "final_output": {
+        "node_id": "final_output",
+        "node_type": "output",
+        "position": {"x": 650, "y": 150},
+        "parameters": {
+          "label": "Processed Result"
+        },
+        "label": "Final Output",
+        "description": "Combined result from custom nodes"
+      }
+    },
+    "edges": [
+      {
+        "edge_id": "input_to_processor",
+        "source_node": "test_input",
+        "source_port": "output",
+        "target_node": "custom_processor",
+        "target_port": "input"
+      },
+      {
+        "edge_id": "processor_to_formatter",
+        "source_node": "custom_processor",
+        "source_port": "count_string",
+        "target_node": "text_formatter",
+        "target_port": "text"
+      },
+      {
+        "edge_id": "formatter_to_output",
+        "source_node": "text_formatter",
+        "source_port": "result",
+        "target_node": "final_output",
+        "target_port": "input"
+      }
+    ]
+  },
+  "exported_at": "2025-09-09T07:20:00.000Z",
+  "original_id": "auto-discovery-test"
+}

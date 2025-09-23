@@ -1,0 +1,148 @@
+{
+  "nodecules_version": "1.0",
+  "graph": {
+    "name": "Context Management Demo",
+    "description": "Demonstrates context storage, retrieval, and key generation for stateless AI workflows",
+    "metadata": {
+      "category": "context-management",
+      "tags": ["context", "storage", "demo", "stateless"],
+      "author": "Nodecules Team",
+      "difficulty": "beginner"
+    },
+    "nodes": {
+      "sample_data": {
+        "node_id": "sample_data",
+        "node_type": "input",
+        "position": {"x": 50, "y": 100},
+        "parameters": {
+          "label": "Sample Data",
+          "data_type": "json",
+          "value": "{\"messages\": [{\"role\": \"user\", \"content\": \"Hello!\"}, {\"role\": \"assistant\", \"content\": \"Hi there! How can I help?\"}], \"session_info\": {\"started\": \"2025-09-09\", \"user_id\": \"demo_user\"}}"
+        },
+        "label": "Sample Context Data",
+        "description": "JSON data to store in context"
+      },
+      "generate_key": {
+        "node_id": "generate_key",
+        "node_type": "generate_random_key",
+        "position": {"x": 50, "y": 200},
+        "parameters": {
+          "prefix": "demo_",
+          "key_format": "words",
+          "key_length": 12,
+          "include_timestamp": false
+        },
+        "label": "Generate Demo Key",
+        "description": "Creates a human-readable key"
+      },
+      "store_context": {
+        "node_id": "store_context",
+        "node_type": "context_store",
+        "position": {"x": 250, "y": 150},
+        "parameters": {
+          "expires_hours": 2,
+          "overwrite": true
+        },
+        "label": "Store Context",
+        "description": "Save data with generated key"
+      },
+      "retrieve_context": {
+        "node_id": "retrieve_context",
+        "node_type": "context_retrieve",
+        "position": {"x": 450, "y": 150},
+        "parameters": {
+          "cleanup_expired": true
+        },
+        "label": "Retrieve Context",
+        "description": "Get stored data back"
+      },
+      "list_contexts": {
+        "node_id": "list_contexts",
+        "node_type": "context_list",
+        "position": {"x": 450, "y": 250},
+        "parameters": {
+          "include_expired": false,
+          "limit": 10
+        },
+        "label": "List All Contexts",
+        "description": "Show all stored contexts"
+      },
+      "key_output": {
+        "node_id": "key_output",
+        "node_type": "output",
+        "position": {"x": 650, "y": 100},
+        "parameters": {
+          "label": "Generated Key"
+        },
+        "label": "Context Key",
+        "description": "The key that was generated"
+      },
+      "data_output": {
+        "node_id": "data_output",
+        "node_type": "output",
+        "position": {"x": 650, "y": 150},
+        "parameters": {
+          "label": "Retrieved Data"
+        },
+        "label": "Retrieved Context",
+        "description": "The data that was stored and retrieved"
+      },
+      "list_output": {
+        "node_id": "list_output",
+        "node_type": "output",
+        "position": {"x": 650, "y": 250},
+        "parameters": {
+          "label": "Context List"
+        },
+        "label": "All Contexts",
+        "description": "List of all stored contexts"
+      }
+    },
+    "edges": [
+      {
+        "edge_id": "key_to_store",
+        "source_node": "generate_key",
+        "source_port": "random_key",
+        "target_node": "store_context",
+        "target_port": "context_key"
+      },
+      {
+        "edge_id": "data_to_store",
+        "source_node": "sample_data",
+        "source_port": "output",
+        "target_node": "store_context",
+        "target_port": "context_data"
+      },
+      {
+        "edge_id": "key_to_retrieve",
+        "source_node": "generate_key",
+        "source_port": "random_key",
+        "target_node": "retrieve_context",
+        "target_port": "context_key"
+      },
+      {
+        "edge_id": "key_to_output",
+        "source_node": "store_context",
+        "source_port": "stored_key",
+        "target_node": "key_output",
+        "target_port": "input"
+      },
+      {
+        "edge_id": "retrieved_to_output",
+        "source_node": "retrieve_context",
+        "source_port": "context_data",
+        "target_node": "data_output",
+        "target_port": "input"
+      },
+      {
+        "edge_id": "list_to_output",
+        "source_node": "list_contexts",
+        "source_port": "contexts",
+        "target_node": "list_output",
+        "target_port": "input"
+      }
+    ]
+  },
+  "exported_at": "2025-09-09T07:20:00.000Z",
+  "original_id": "context-demo-example"
+}

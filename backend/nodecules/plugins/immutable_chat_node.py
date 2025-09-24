@@ -119,9 +119,8 @@ class ImmutableChatNode(BaseNode):
         message = context.get_input_value(node_data.node_id, "message")
         prev_context_key = context.get_input_value(node_data.node_id, "context_key")
         
-        # Also check for injected context key from instance execution
-        if not prev_context_key:
-            prev_context_key = context.execution_inputs.get("_context_key")
+        # No global fallback - if no context_key input is connected, start fresh
+        # This ensures explicit behavior and prevents context bleeding between LLMs
         
         # Get parameters with input override support
         params = node_data.parameters
@@ -219,9 +218,8 @@ class ImmutableChatNode(BaseNode):
         message = context.get_input_value(node_data.node_id, "message")
         prev_context_key = context.get_input_value(node_data.node_id, "context_key")
         
-        # Also check for injected context key from instance execution
-        if not prev_context_key:
-            prev_context_key = context.execution_inputs.get("_context_key")
+        # No global fallback - if no context_key input is connected, start fresh
+        # This ensures explicit behavior and prevents context bleeding between LLMs
         
         # Get parameters with input override support
         params = node_data.parameters

@@ -134,12 +134,11 @@ class GraphInstanceExecutor:
                 for node_id, node_outputs in instance.last_outputs.items():
                     if isinstance(node_outputs, dict):
                         # Handle both old context_id and new context_key
+                        # Store node-specific context keys only - no global bleeding
                         if 'context_key' in node_outputs:
                             enhanced_inputs[f"_context_key_{node_id}"] = node_outputs['context_key']
-                            enhanced_inputs["_context_key"] = node_outputs['context_key']
                         elif 'context_id' in node_outputs:
                             enhanced_inputs[f"_context_id_{node_id}"] = node_outputs['context_id']
-                            enhanced_inputs["_context_id"] = node_outputs['context_id']
             
             # Create instance-aware execution context
             context = InstanceExecutionContext(

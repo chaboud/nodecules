@@ -13,6 +13,8 @@ interface Message {
   timestamp: Date
   showMarkdown?: boolean
   rawExecutionData?: any  // Store the raw execution output for debugging
+  executionStatus?: string  // Separate field for live execution status
+  isExecuting?: boolean     // Whether execution is still in progress
 }
 
 interface ChatResponse {
@@ -142,11 +144,14 @@ export default function ChatInterface() {
         type: 'assistant',
         content: '',
         timestamp: new Date(),
+        executionStatus: 'Starting execution...',
+        isExecuting: true,
         rawExecutionData: {
           inputs,
           allChunks: [],
           graphId: selectedGraph,
-          status: 'streaming'
+          status: 'streaming',
+          startTime: Date.now()
         }
       }
       setMessages(prev => [...prev, aiMessage])
@@ -163,43 +168,78 @@ export default function ChatInterface() {
           console.log('Streaming chunk:', chunk)
           allChunks.push(chunk)  // Store for debug view
           
-          if (chunk.type === 'node_chunk') {
-            // Only show streaming from the final output node (not all streaming nodes)
-            // For multi_pass_chat, the final output should come from a specific node
-            // For now, don't stream - let the final result show at the end
-            // streamedContent += chunk.chunk  // Commented out - causes mixed streaming
+          if (chunk.type === 'node_start') {
+            // Node started processing
             setMessages(prev => prev.map(msg => 
               msg.id === aiMessageId 
                 ? { 
                     ...msg, 
-                    content: `Processing... (${chunk.node_id})`,
-                    showMarkdown: hasMarkdownContent(streamedContent) ? true : undefined
+                    executionStatus: `Processing: ${chunk.node_label || chunk.node_type}`,
+                    isExecuting: true,
+                    rawExecutionData: {
+                      ...msg.rawExecutionData,
+                      currentNode: chunk.node_id,
+                      nodeLabel: chunk.node_label,
+                      currentState: chunk.current_state,
+                      allChunks
+                    }
                   }
                 : msg
             ))
-            setThinkingState({ isThinking: true, message: 'Streaming response...', startTime: Date.now() })
+            setThinkingState({ 
+              isThinking: true, 
+              message: `Processing: ${chunk.node_label || chunk.node_type}`, 
+              startTime: Date.now() 
+            })
+            
+          } else if (chunk.type === 'node_chunk') {
+            // Only show streaming from the final output node (not all streaming nodes)
+            // For multi_pass_chat, the final output should come from a specific node
+            // For now, don't stream - let the final result show at the end
+            // streamedContent += chunk.chunk  // Commented out - causes mixed streaming
+            
+            // DON'T update content - preserve debug view
+            setMessages(prev => prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { 
+                    ...msg, 
+                    executionStatus: `Processing: ${chunk.node_label || chunk.node_type}`,
+                    rawExecutionData: {
+                      ...msg.rawExecutionData,
+                      allChunks
+                    }
+                  }
+                : msg
+            ))
+            // DON'T update thinkingState - no bottom streaming box
             
           } else if (chunk.type === 'node_complete') {
-            // Node completed - check for any potential response content
-            // This handles non-streaming nodes that might provide final responses
-            if (!streamedContent && chunk.outputs) {
-              // Look for common response patterns from different node types
-              const possibleResponse = chunk.outputs.response || 
-                                     chunk.outputs.result || 
-                                     chunk.outputs.output || 
-                                     chunk.outputs.processed || ''
-              
-              if (possibleResponse && typeof possibleResponse === 'string') {
-                setMessages(prev => prev.map(msg => 
-                  msg.id === aiMessageId 
-                    ? { 
-                        ...msg, 
-                        content: possibleResponse,
-                        showMarkdown: hasMarkdownContent(possibleResponse) ? true : undefined
-                      }
-                    : msg
-                ))
-              }
+            // Node completed - update progress and live state
+            setMessages(prev => prev.map(msg => 
+              msg.id === aiMessageId 
+                ? { 
+                    ...msg, 
+                    executionStatus: chunk.live_state?.execution_progress ? 
+                      `Progress: ${chunk.live_state.execution_progress.completed}/${chunk.live_state.execution_progress.total} nodes completed` :
+                      `Completed: ${chunk.node_label || chunk.node_type}`,
+                    rawExecutionData: {
+                      ...msg.rawExecutionData,
+                      liveState: chunk.live_state,
+                      completedNodes: chunk.live_state?.node_statuses || {},
+                      allChunks
+                    }
+                  }
+                : msg
+            ))
+            
+            // Update thinking state with progress
+            const progress = chunk.live_state?.execution_progress
+            if (progress) {
+              setThinkingState({ 
+                isThinking: true, 
+                message: `Progress: ${progress.completed}/${progress.total} nodes completed`, 
+                startTime: Date.now() 
+              })
             }
             
           } else if (chunk.type === 'execution_complete') {
@@ -233,6 +273,8 @@ export default function ChatInterface() {
                 ? { 
                     ...msg,
                     content: finalResponse,
+                    executionStatus: 'Execution completed',
+                    isExecuting: false,
                     showMarkdown: hasMarkdownContent(finalResponse) ? true : true, // Default to formatted for normal use
                     selectedNodeType: 'output', // Default to output nodes
                     selectedNodeName: 'chat_response', // Default to chat_response
@@ -243,7 +285,11 @@ export default function ChatInterface() {
                       executionComplete: chunk,
                       extractedResponse: finalResponse,
                       streamedLength: streamedContent.length,
-                      graphId: selectedGraph
+                      graphId: selectedGraph,
+                      startTime: msg.rawExecutionData?.startTime,
+                      executionDuration: msg.rawExecutionData?.startTime ? 
+                        `${((Date.now() - msg.rawExecutionData.startTime) / 1000).toFixed(1)}s` : 
+                        'unknown'
                     }
                   }
                 : msg
@@ -623,8 +669,8 @@ export default function ChatInterface() {
                                 >
                                   <option value="(all)">(all)</option>
                                   {/* Dynamically populate based on type filter */}
-                                  {message.rawExecutionData?.finalOutputs && 
-                                    Object.keys(message.rawExecutionData.finalOutputs)
+                                  {(message.rawExecutionData?.finalOutputs || message.rawExecutionData?.liveState?.all_outputs) && 
+                                    Object.keys(message.rawExecutionData?.finalOutputs || message.rawExecutionData?.liveState?.all_outputs || {})
                                       .filter(nodeId => {
                                         const nodeType = message.selectedNodeType || 'output'
                                         if (nodeType === '(all)') return true
@@ -689,6 +735,7 @@ export default function ChatInterface() {
                             </div>
                           </div>
                           
+                          
                           {/* Content Display */}
                           {message.showMarkdown === true ? (
                             <div className="prose prose-sm max-w-none prose-table:text-sm">
@@ -721,7 +768,9 @@ export default function ChatInterface() {
                                       return JSON.stringify(message.rawExecutionData, null, 2)
                                     } else if (nodeType !== '(all)' && nodeName === '(all)') {
                                       // Show all nodes of a specific type
-                                      const filteredNodes = Object.entries(message.rawExecutionData.finalOutputs || {})
+                                      const allOutputs = message.rawExecutionData?.finalOutputs || 
+                                                        message.rawExecutionData?.liveState?.all_outputs || {}
+                                      const filteredNodes = Object.entries(allOutputs)
                                         .filter(([nodeId]) => {
                                           if (nodeType === 'output') return nodeId.includes('output') || nodeId.includes('response') || nodeId === 'chat_response'
                                           if (nodeType === 'input') return nodeId.includes('input')
@@ -733,7 +782,9 @@ export default function ChatInterface() {
                                       return JSON.stringify(filteredNodes, null, 2)
                                     } else {
                                       // Show specific node
-                                      const specificNode = message.rawExecutionData.finalOutputs?.[nodeName]
+                                      const allOutputs = message.rawExecutionData?.finalOutputs || 
+                                                        message.rawExecutionData?.liveState?.all_outputs || {}
+                                      const specificNode = allOutputs[nodeName]
                                       return specificNode ? JSON.stringify(specificNode, null, 2) : `No data found for node: ${nodeName}`
                                     }
                                   })()}
@@ -759,45 +810,39 @@ export default function ChatInterface() {
                       )}
                     </div>
                     
-                    {/* Timestamp */}
-                    <p className={`text-xs ${
+                    {/* Status & Timestamp */}
+                    <div className={`text-xs ${
                       message.type === 'user' ? 'text-blue-100' : 'text-gray-500'
                     }`}>
-                      {message.timestamp.toLocaleTimeString()}
-                    </p>
+                      {message.type === 'assistant' && message.executionStatus ? (
+                        <div className="flex items-center space-x-2">
+                          {message.isExecuting ? (
+                            <>
+                              <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                              <span>{message.executionStatus}</span>
+                            </>
+                          ) : (
+                            <>
+                              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                              <span>
+                                {message.timestamp.toLocaleDateString('en-US', { 
+                                  month: 'short', 
+                                  day: 'numeric' 
+                                })} - {message.timestamp.toLocaleTimeString()} - {message.executionStatus} ({message.rawExecutionData?.executionDuration || 'duration unknown'})
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <span>{message.timestamp.toLocaleTimeString()}</span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
             ))
           )}
           
-          {executeGraphMutation.isPending && (
-            <div className="flex justify-start">
-              <div className="flex items-start space-x-3 max-w-2xl">
-                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-green-600">
-                  <Bot className="h-4 w-4 text-white" />
-                </div>
-                <div className="bg-white text-gray-900 border border-gray-200 rounded-lg px-4 py-2">
-                  <div className="flex items-center justify-between space-x-4">
-                    <p className="text-gray-500">
-                      {thinkingState.message || 'Thinking...'}
-                      {thinkingState.startTime && (
-                        <span className="text-xs text-gray-400 ml-2">
-                          ({Math.floor((Date.now() - thinkingState.startTime) / 1000)}s)
-                        </span>
-                      )}
-                    </p>
-                    <button
-                      onClick={handleCancel}
-                      className="text-red-500 hover:text-red-700 text-sm font-medium"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
           
           {/* Invisible div to scroll to */}
           <div ref={messagesEndRef} />

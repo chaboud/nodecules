@@ -194,6 +194,23 @@ class GraphExecutor:
             for node_id in execution_order:
                 node_data = graph.nodes[node_id]
                 
+                # Yield node start event
+                context.set_node_status(node_id, NodeStatus.RUNNING)
+                yield {
+                    "type": "node_start",
+                    "node_id": node_id,
+                    "node_type": node_data.node_type,
+                    "node_label": node_data.label or node_data.node_type,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "current_state": {
+                        "completed_nodes": [nid for nid, status in context.node_status.items() 
+                                          if status == NodeStatus.COMPLETED],
+                        "active_node": node_id,
+                        "pending_nodes": [nid for nid, status in context.node_status.items() 
+                                        if status == NodeStatus.PENDING]
+                    }
+                }
+                
                 # Check if node supports streaming
                 if self._node_supports_streaming(node_data):
                     # Stream this node's execution
@@ -201,6 +218,8 @@ class GraphExecutor:
                         yield {
                             "type": "node_chunk",
                             "node_id": node_id,
+                            "node_type": node_data.node_type,
+                            "node_label": node_data.label or node_data.node_type,
                             "chunk": chunk,
                             "timestamp": datetime.utcnow().isoformat()
                         }
@@ -208,13 +227,24 @@ class GraphExecutor:
                     # Execute normally
                     await self._execute_node(context, node_id)
                     
-                # Yield node completion
+                # Yield node completion with live JSON state
                 yield {
                     "type": "node_complete",
                     "node_id": node_id,
+                    "node_type": node_data.node_type,
+                    "node_label": node_data.label or node_data.node_type,
                     "status": context.node_status.get(node_id, NodeStatus.PENDING).value,
                     "outputs": context.node_outputs.get(node_id, {}),
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "live_state": {
+                        "all_outputs": context.node_outputs,
+                        "node_statuses": {nid: status.value for nid, status in context.node_status.items()},
+                        "execution_progress": {
+                            "completed": len([s for s in context.node_status.values() if s == NodeStatus.COMPLETED]),
+                            "total": len(graph.nodes),
+                            "current": node_id
+                        }
+                    }
                 }
                 
             context.completed_at = datetime.utcnow()

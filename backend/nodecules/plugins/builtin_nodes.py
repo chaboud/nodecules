@@ -447,6 +447,167 @@ class JsonReplaceNode(BaseNode):
             }
 
 
+class JsonCollectNode(BaseNode):
+    """Builds JSON objects incrementally by adding key-value pairs."""
+    
+    NODE_TYPE = "json_collect"
+    
+    def __init__(self):
+        spec = NodeSpec(
+            node_type=self.NODE_TYPE,
+            display_name="JSON Collect",
+            description="Builds JSON objects incrementally by adding key-value pairs to existing or new objects",
+            category="Data Processing",
+            inputs=[
+                PortSpec(name="previous_object", data_type=DataType.TEXT, description="Existing JSON object to extend (empty = create new object)", required=False),
+                PortSpec(name="new_key", data_type=DataType.TEXT, description="Key name to add/update in the JSON object", required=False),
+                PortSpec(name="new_value", data_type=DataType.ANY, description="Value to assign to the specified key", required=False)
+            ],
+            outputs=[
+                PortSpec(name="output", data_type=DataType.TEXT, description="Resulting JSON string"),
+                PortSpec(name="length", data_type=DataType.TEXT, description="Character count of resulting JSON"),
+                PortSpec(name="key_count", data_type=DataType.TEXT, description="Number of keys in the object"),
+                PortSpec(name="status", data_type=DataType.TEXT, description="Operation status (success, warning, error)"),
+                PortSpec(name="message", data_type=DataType.TEXT, description="Status details and warnings")
+            ],
+            parameters=[
+                ParameterSpec(
+                    name="new_key",
+                    data_type="string",
+                    default="",
+                    description="Key name to add/update (used if input not connected)"
+                ),
+                ParameterSpec(
+                    name="new_value",
+                    data_type="string",
+                    default="",
+                    description="Value to assign to the specified key (used if input not connected)"
+                )
+            ]
+        )
+        super().__init__(spec)
+        
+    async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
+        previous_object = context.get_input_value(node_data.node_id, "previous_object")
+        
+        # Use input if connected, otherwise fall back to parameter
+        new_key = context.get_input_value(node_data.node_id, "new_key")
+        if new_key is None:
+            new_key = node_data.parameters.get("new_key", "")
+            
+        new_value = context.get_input_value(node_data.node_id, "new_value")
+        if new_value is None:
+            new_value = node_data.parameters.get("new_value", "")
+        
+        # Validate required inputs
+        if new_key is None or new_key == "":
+            return {
+                "output": "{}",
+                "length": "2",
+                "key_count": "0",
+                "status": "error",
+                "message": "new_key is required and cannot be empty"
+            }
+        
+        # Parse previous object or create new one
+        try:
+            if previous_object is None or previous_object.strip() == "":
+                data = {}
+                message_parts = ["Created new object"]
+            else:
+                data = json.loads(previous_object)
+                if not isinstance(data, dict):
+                    return {
+                        "output": "{}",
+                        "length": "2",
+                        "key_count": "0",
+                        "status": "error",
+                        "message": "previous_object must be a JSON object, not array or primitive"
+                    }
+                message_parts = ["Extended existing object"]
+        except json.JSONDecodeError as e:
+            return {
+                "output": "{}",
+                "length": "2",
+                "key_count": "0",
+                "status": "error",
+                "message": f"Invalid JSON in previous_object: {str(e)}"
+            }
+        
+        # Check for key overwrite
+        status = "success"
+        if new_key in data:
+            status = "warning"
+            message_parts.append(f"Overwrote existing key '{new_key}'")
+        else:
+            message_parts.append(f"Added new key '{new_key}'")
+        
+        # Auto-detect and convert value types
+        processed_value = self._process_value(new_value)
+        
+        # Set the new key-value pair
+        data[new_key] = processed_value
+        
+        # Serialize back to JSON
+        try:
+            result_json = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+        except Exception as e:
+            return {
+                "output": "{}",
+                "length": "2", 
+                "key_count": "0",
+                "status": "error",
+                "message": f"Failed to serialize result: {str(e)}"
+            }
+        
+        return {
+            "output": result_json,
+            "length": str(len(result_json)),
+            "key_count": str(len(data)),
+            "status": status,
+            "message": "; ".join(message_parts)
+        }
+    
+    def _process_value(self, value):
+        """Process and type-convert the input value appropriately."""
+        if value is None:
+            return None
+        
+        # If it's already a non-string type, keep it
+        if not isinstance(value, str):
+            return value
+        
+        # For string values, try to detect and convert types
+        value_str = value.strip()
+        
+        # Check for boolean values
+        if value_str.lower() in ('true', 'false'):
+            return value_str.lower() == 'true'
+        
+        # Check for null
+        if value_str.lower() == 'null':
+            return None
+        
+        # Try to parse as number (int or float)
+        try:
+            # Check if it's an integer
+            if '.' not in value_str and 'e' not in value_str.lower():
+                return int(value_str)
+            else:
+                return float(value_str)
+        except ValueError:
+            pass
+        
+        # Try to parse as JSON (for objects/arrays)
+        try:
+            return json.loads(value_str)
+        except json.JSONDecodeError:
+            pass
+        
+        # Default: return as string
+        return value
+
+
 class OutputNode(BaseNode):
     """Output node for displaying results."""
     
@@ -504,6 +665,7 @@ BUILTIN_NODES = {
     "text_concat": TextConcatNode,
     "json_extract": JsonExtractNode,
     "json_replace": JsonReplaceNode,
+    "json_collect": JsonCollectNode,
     "output": OutputNode,
     **SMART_CHAT_NODES,  # Smart context-aware chat
     **IMMUTABLE_CHAT_NODES,  # Immutable content-addressable chat

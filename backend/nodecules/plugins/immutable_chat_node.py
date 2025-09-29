@@ -22,7 +22,8 @@ class ImmutableChatNode(BaseNode):
                 PortSpec(
                     name="message",
                     data_type=DataType.TEXT,
-                    description="User message"
+                    required=False,
+                    description="User message (optional, uses node parameter if not connected)"
                 ),
                 PortSpec(
                     name="context_key",
@@ -86,6 +87,12 @@ class ImmutableChatNode(BaseNode):
             ],
             parameters=[
                 ParameterSpec(
+                    name="message",
+                    data_type="text",
+                    default="",
+                    description="User message (used if input not connected)"
+                ),
+                ParameterSpec(
                     name="provider",
                     data_type="select",
                     default="ollama",
@@ -142,8 +149,11 @@ class ImmutableChatNode(BaseNode):
     
     async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
         """Execute immutable chat with content-addressable contexts."""
-        # Get inputs
+        # Get inputs with parameter fallback for message
         message = context.get_input_value(node_data.node_id, "message")
+        if message is None:
+            message = node_data.parameters.get("message", "")
+        
         prev_context_key = context.get_input_value(node_data.node_id, "context_key")
         prev_context_data = context.get_input_value(node_data.node_id, "context_data")
         
@@ -312,8 +322,11 @@ class ImmutableChatNode(BaseNode):
     
     async def execute_streaming(self, context: ExecutionContext, node_data: NodeData) -> AsyncGenerator[str, None]:
         """Execute with streaming response."""
-        # Get inputs
+        # Get inputs with parameter fallback for message
         message = context.get_input_value(node_data.node_id, "message")
+        if message is None:
+            message = node_data.parameters.get("message", "")
+        
         prev_context_key = context.get_input_value(node_data.node_id, "context_key")
         
         # No global fallback - if no context_key input is connected, start fresh

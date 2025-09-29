@@ -17,10 +17,12 @@ A basic node-based graph processing engine for building flexible AI-powered work
 - Support for various graph types (interactive, write-only, read-only)
 
 ### 🤖 **AI Integration**
-- **Ollama** support for local LLM execution
+- **Multiple LLM Providers**: Ollama (local), Claude/Anthropic, AWS Bedrock
+- **Unified Context System** with context_key and context_data supremacy model
 - **Immutable content-addressable contexts** for efficient memory management
 - Smart context management with provider-native optimization
-- Multiple chat node types (smart_chat, immutable_chat)
+- Context inspection and passthrough capabilities for debugging
+- Multiple chat node types (smart_chat, immutable_chat) with streaming support
 
 ### 🔧 **Advanced Graph Management**
 - Create, edit, copy, delete, and execute graphs
@@ -47,7 +49,16 @@ A basic node-based graph processing engine for building flexible AI-powered work
    cd nodecules
    ```
 
-2. **Start with Docker Compose**:
+2. **Configure environment** (optional, for AI providers):
+   ```bash
+   # Copy the example environment file
+   cp .env.example .env
+   
+   # Edit .env to add your API keys (see AI Provider Setup below)
+   # nano .env
+   ```
+
+3. **Start with Docker Compose**:
    ```bash
    docker-compose up -d
    ```
@@ -58,20 +69,21 @@ A basic node-based graph processing engine for building flexible AI-powered work
    - Backend API (port 8000)
    - Frontend web app (port 3000)
 
-3. **Verify setup** (database initializes automatically):
+4. **Verify setup** (database initializes automatically):
    ```bash
    # Check logs to ensure database initialization completed
    docker-compose logs backend | grep -E "(Database initialization|✅|❌)"
    ```
 
-4. **Access the application**:
+5. **Access the application**:
    - **Web Interface**: http://localhost:3000
    - **API Docs**: http://localhost:8000/docs
    - **Backend API**: http://localhost:8000
 
-5. **Test it works**:
+6. **Test it works**:
    - Go to http://localhost:3000
    - Click "Import Graph" (green button)
+   - Or test the API directly: `curl http://localhost:8000/api/v1/plugins/nodes | jq`
    - Import `/examples/simple_text_processing.nodecules.json`
    - Click "Execute" to test
 
@@ -99,13 +111,79 @@ For development with hot reloading:
    npm run dev
    ```
 
+## 🔧 AI Provider Setup
+
+To use external AI providers, configure your API keys in the `.env` file:
+
+### 🧪 **Quick Test (Recommended)**
+After configuring your API keys, run the automated test:
+```bash
+# Test Claude integration end-to-end
+./test_claude_integration.sh
+
+# Or test API manually
+curl -X GET "http://localhost:8000/api/v1/plugins/nodes/immutable_chat" | jq
+```
+
+### Claude/Anthropic
+1. Get your API key from [Anthropic Console](https://console.anthropic.com/)
+2. Add to `.env`:
+   ```bash
+   ANTHROPIC_API_KEY=sk-ant-api03-your-key-here
+   ```
+3. Use `anthropic` provider in chat nodes with models:
+   - `claude-3-5-haiku-20241022` (latest Haiku - fast, cheaper)
+   - `claude-3-5-sonnet-20241022` (latest Sonnet - balanced, most popular)
+   - `claude-3-5-sonnet-20240620` (previous Sonnet version)
+   - `claude-3-haiku-20240307` (legacy Haiku)
+   - `claude-3-opus-20240229` (most capable, expensive)
+
+### AWS Bedrock
+**Option 1: Bearer Token (Recommended - Simple)**
+1. Get your API key from [AWS Console > Bedrock > API Keys](https://console.aws.amazon.com/bedrock/)
+2. Add to `.env`:
+   ```bash
+   AWS_BEARER_TOKEN_BEDROCK=your-bedrock-api-key-here
+   AWS_REGION=us-east-1
+   ```
+
+**Option 2: Full AWS Credentials**
+1. Configure AWS credentials (CLI or environment)
+2. Add to `.env`:
+   ```bash
+   AWS_ACCESS_KEY_ID=your-access-key
+   AWS_SECRET_ACCESS_KEY=your-secret-key
+   AWS_REGION=us-east-1
+   ```
+
+**Usage:**
+- Use `bedrock` provider with models like:
+  - `us.anthropic.claude-3-5-haiku-20241022-v1:0` (latest)
+  - `us.anthropic.claude-3-5-sonnet-20241022-v1:0`
+  - `anthropic.claude-3-haiku-20240307-v1:0` (legacy)
+
+### Ollama (Local)
+- No API key needed
+- Install [Ollama](https://ollama.ai/) locally
+- Pull models: `ollama pull llama3.2:3b`
+- Use `ollama` provider (default)
+
+### Environment Variables Reference
+- `ANTHROPIC_API_KEY`: Claude API access
+- `AWS_BEARER_TOKEN_BEDROCK`: Bedrock API key (preferred)
+- `AWS_ACCESS_KEY_ID`: Bedrock access key (fallback)
+- `AWS_SECRET_ACCESS_KEY`: Bedrock secret key (fallback)
+- `AWS_REGION`: Bedrock region (default: us-east-1)
+- `DATABASE_URL`: PostgreSQL connection
+- `REDIS_URL`: Redis connection
+
 ## 🔧 Configuration
 
-**Environment Variables** (optional):
-- `ANTHROPIC_API_KEY`: For Claude AI integration
-- `OPENAI_API_KEY`: For OpenAI GPT models  
-- `DATABASE_URL`: PostgreSQL connection (default works for Docker)
-- `REDIS_URL`: Redis connection (default works for Docker)
+The system uses a unified context model where you can:
+- **Inspect contexts**: Connect `context_data` output to debug full conversation history
+- **Pass contexts**: Use `context_key` for efficient storage or `context_data` for full control
+- **Provider flexibility**: Switch between Ollama, Claude, and Bedrock seamlessly
+- **Supremacy model**: When both context_key and context_data are provided, context_key takes precedence (configurable)
 
 ## 🔧 Troubleshooting
 

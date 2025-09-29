@@ -481,6 +481,134 @@ class AnthropicAdapter(BaseProviderAdapter):
         }
 
 
+class BedrockAdapter(BaseProviderAdapter):
+    """AWS Bedrock adapter."""
+    
+    def __init__(self):
+        super().__init__()
+        try:
+            import boto3
+            self.boto3 = boto3
+        except ImportError:
+            raise ImportError("boto3 package required for Bedrock support. Install with: pip install boto3")
+    
+    async def generate_with_context(
+        self, 
+        context_data: Dict[str, Any], 
+        new_message: str,
+        model: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+        temperature: float = 0.7,
+        max_tokens: int = 4000,
+        **kwargs
+    ) -> tuple[str, Dict[str, Any]]:
+        """Generate response using AWS Bedrock with bearer token or AWS credentials."""
+        import os
+        import json
+        
+        # Check for bearer token first (new preferred method)
+        bearer_token = os.getenv('AWS_BEARER_TOKEN_BEDROCK')
+        
+        # Initialize Bedrock client
+        try:
+            if bearer_token:
+                # Use bearer token authentication
+                os.environ['AWS_BEARER_TOKEN_BEDROCK'] = bearer_token
+                bedrock = self.boto3.client(
+                    service_name='bedrock-runtime',
+                    region_name=os.getenv('AWS_REGION', 'us-east-1')
+                )
+            else:
+                # Fall back to AWS credentials
+                bedrock = self.boto3.client(
+                    'bedrock-runtime',
+                    region_name=os.getenv('AWS_REGION', 'us-east-1'),
+                    aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+                    aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY')
+                )
+        except Exception as e:
+            auth_method = "bearer token" if bearer_token else "AWS credentials"
+            raise RuntimeError(f"Failed to initialize Bedrock client with {auth_method}: {str(e)}")
+        
+        # Get existing messages
+        messages = context_data.get("messages", [])
+        
+        # Separate system message from conversation messages
+        system_prompt = None
+        conversation_messages = []
+        
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+            else:
+                conversation_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+        
+        # Add new user message
+        conversation_messages.append({
+            "role": "user",
+            "content": new_message
+        })
+        
+        try:
+            # Use the new Converse API (simpler and more consistent)
+            converse_request = {
+                "modelId": model,
+                "messages": [
+                    {
+                        "role": msg["role"],
+                        "content": [{"text": msg["content"]}]
+                    } for msg in conversation_messages
+                ],
+                "inferenceConfig": {
+                    "temperature": temperature,
+                    "maxTokens": max_tokens
+                }
+            }
+            
+            if system_prompt:
+                converse_request["system"] = [{"text": system_prompt}]
+            
+            # Use converse API instead of invoke_model
+            response = bedrock.converse(**converse_request)
+            
+            # Extract response text from converse response
+            response_text = ""
+            if "output" in response and "message" in response["output"]:
+                for content in response["output"]["message"].get("content", []):
+                    if "text" in content:
+                        response_text += content["text"]
+            
+            # Update context with new exchange
+            updated_messages = messages.copy()
+            updated_messages.extend([
+                {"role": "user", "content": new_message},
+                {"role": "assistant", "content": response_text}
+            ])
+            
+            return response_text, {
+                "messages": updated_messages,
+                "provider_type": "full_history"
+            }
+            
+        except Exception as e:
+            auth_info = "bearer token" if bearer_token else "AWS credentials"
+            raise RuntimeError(f"Bedrock API error (using {auth_info}): {str(e)}. \n" + 
+                             f"Ensure you have either AWS_BEARER_TOKEN_BEDROCK or AWS credentials configured.")
+    
+    def create_new_context(self, system_prompt: str = None) -> Dict[str, Any]:
+        """Create new conversation context."""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        
+        return {
+            "messages": messages,
+            "provider_type": "full_history"
+        }
+
+
 class SmartContextManager:
     """Context manager that adapts to provider capabilities."""
     
@@ -494,6 +622,13 @@ class SmartContextManager:
             "anthropic": AnthropicAdapter(),
             "mock": MockAdapter(),
         }
+        
+        # Add Bedrock adapter if boto3 is available
+        try:
+            self.adapters["bedrock"] = BedrockAdapter()
+        except ImportError:
+            # Bedrock not available - skip it
+            pass
     
     def _get_cache_key(self, context_id: str) -> str:
         return f"smart_context:{context_id}"
@@ -636,6 +771,21 @@ class SmartContextManager:
                 db.close()
         
         return context_updating_stream(), context_id
+    
+    async def get_context(self, context_id: str) -> Optional[Dict[str, Any]]:
+        """Get full context data for external systems."""
+        context = await self._load_context(context_id)
+        if not context:
+            return None
+        
+        return {
+            "context_id": context.context_id,
+            "provider": context.provider,
+            "messages": context.messages,
+            "turn_count": context.turn_count,
+            "supports_caching": ProviderCapabilities.supports_caching(context.provider),
+            "provider_context_data": context.provider_context_data
+        }
     
     async def get_context_info(self, context_id: str) -> Optional[Dict[str, Any]]:
         """Get context information for external systems."""

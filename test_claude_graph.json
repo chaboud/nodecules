@@ -1,0 +1,66 @@
+{
+  "name": "Claude API Test",
+  "description": "Simple test of Claude API integration with context supremacy",
+  "nodes": {
+    "input_1": {
+      "node_id": "input_1",
+      "node_type": "input",
+      "position": {"x": 100, "y": 100},
+      "parameters": {
+        "label": "message"
+      }
+    },
+    "claude_chat": {
+      "node_id": "claude_chat",
+      "node_type": "immutable_chat",
+      "position": {"x": 300, "y": 100},
+      "parameters": {
+        "provider": "anthropic",
+        "model": "claude-3-haiku-20240307",
+        "system_prompt": "You are a helpful assistant. Always respond with exactly one sentence.",
+        "temperature": 0.3,
+        "streaming": false,
+        "context_data_dominant": false
+      }
+    },
+    "output_response": {
+      "node_id": "output_response",
+      "node_type": "output",
+      "position": {"x": 500, "y": 80},
+      "parameters": {
+        "label": "claude_response"
+      }
+    },
+    "output_context": {
+      "node_id": "output_context", 
+      "node_type": "output",
+      "position": {"x": 500, "y": 140},
+      "parameters": {
+        "label": "context_data"
+      }
+    }
+  },
+  "edges": [
+    {
+      "edge_id": "e1",
+      "source_node": "input_1",
+      "source_port": "value",
+      "target_node": "claude_chat",
+      "target_port": "message"
+    },
+    {
+      "edge_id": "e2",
+      "source_node": "claude_chat",
+      "source_port": "response",
+      "target_node": "output_response",
+      "target_port": "input"
+    },
+    {
+      "edge_id": "e3",
+      "source_node": "claude_chat",
+      "source_port": "context_data",
+      "target_node": "output_context",
+      "target_port": "input"
+    }
+  ]
+}

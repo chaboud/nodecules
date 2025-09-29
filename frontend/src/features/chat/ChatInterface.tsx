@@ -731,6 +731,58 @@ export default function ChatInterface() {
                                     }
                                   })()}
                                 </select>
+                                
+                                {/* Copy Button */}
+                                <button
+                                  onClick={() => {
+                                    const contentToCopy = (() => {
+                                      if (message.showMarkdown === 'debug') {
+                                        // Copy the JSON content
+                                        const nodeType = message.selectedNodeType || 'output'
+                                        const nodeName = message.selectedNodeName || 'chat_response'
+                                        
+                                        if (nodeType === '(all)' && nodeName === '(all)') {
+                                          return JSON.stringify(message.rawExecutionData, null, 2)
+                                        } else if (nodeType !== '(all)' && nodeName === '(all)') {
+                                          const allOutputs = message.rawExecutionData?.finalOutputs || 
+                                                            message.rawExecutionData?.liveState?.all_outputs || {}
+                                          const filteredNodes = Object.entries(allOutputs)
+                                            .filter(([nodeId]) => {
+                                              if (nodeType === 'output') return nodeId.includes('output') || nodeId.includes('response') || nodeId === 'chat_response'
+                                              if (nodeType === 'input') return nodeId.includes('input')
+                                              if (nodeType === 'chat') return nodeId.includes('chat')
+                                              if (nodeType === 'processing') return nodeId.includes('processor') || nodeId.includes('concat') || nodeId.includes('transform')
+                                              return true
+                                            })
+                                            .reduce((acc, [nodeId, nodeData]) => ({ ...acc, [nodeId]: nodeData }), {})
+                                          return JSON.stringify(filteredNodes, null, 2)
+                                        } else {
+                                          const allOutputs = message.rawExecutionData?.finalOutputs || 
+                                                            message.rawExecutionData?.liveState?.all_outputs || {}
+                                          const specificNode = allOutputs[nodeName]
+                                          return specificNode ? JSON.stringify(specificNode, null, 2) : `No data found for node: ${nodeName}`
+                                        }
+                                      } else {
+                                        // Copy the rendered content (formatted or plain text)
+                                        const nodeName = message.selectedNodeName || 'chat_response'
+                                        const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName] || 
+                                                         message.rawExecutionData?.liveState?.all_outputs?.[nodeName]
+                                        const responseContent = nodeData?.response || nodeData?.result || nodeData?.output
+                                        return responseContent || message.content
+                                      }
+                                    })()
+                                    
+                                    navigator.clipboard.writeText(contentToCopy).then(() => {
+                                      console.log('Content copied to clipboard')
+                                    }).catch(err => {
+                                      console.error('Failed to copy to clipboard:', err)
+                                    })
+                                  }}
+                                  className="p-1 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors"
+                                  title="Copy to clipboard"
+                                >
+                                  📋
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -739,8 +791,8 @@ export default function ChatInterface() {
                           {/* Content Display */}
                           {message.showMarkdown === true ? (
                             <div className="prose prose-sm max-w-none prose-table:text-sm">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {(() => {
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                  {(() => {
                                   // Show content from selected node if available
                                   const nodeName = message.selectedNodeName || 'chat_response'
                                   const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName]
@@ -798,7 +850,8 @@ export default function ChatInterface() {
                               {(() => {
                                 // Show content from selected node if available
                                 const nodeName = message.selectedNodeName || 'chat_response'
-                                const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName]
+                                const nodeData = message.rawExecutionData?.finalOutputs?.[nodeName] || 
+                                                 message.rawExecutionData?.liveState?.all_outputs?.[nodeName]
                                 const responseContent = nodeData?.response || nodeData?.result || nodeData?.output
                                 return responseContent || message.content
                               })()}

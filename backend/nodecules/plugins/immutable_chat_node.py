@@ -4,7 +4,7 @@ from typing import Dict, Any, List, AsyncGenerator
 
 from ..core.types import NodeSpec, PortSpec, ParameterSpec, DataType, ExecutionContext, NodeData, BaseNode
 from ..core.content_addressable_context import content_addressable_context
-from ..core.smart_context import OllamaAdapter
+from ..core.smart_context import OllamaAdapter, AnthropicAdapter
 
 
 class ImmutableChatNode(BaseNode):
@@ -29,6 +29,12 @@ class ImmutableChatNode(BaseNode):
                     data_type=DataType.TEXT,
                     required=False,
                     description="Previous context key (optional)"
+                ),
+                PortSpec(
+                    name="context_data",
+                    data_type=DataType.JSON,
+                    required=False,
+                    description="Previous context data (optional, alternative to context_key)"
                 ),
                 # Optional parameter inputs - can be connected or use node defaults
                 PortSpec(
@@ -68,6 +74,11 @@ class ImmutableChatNode(BaseNode):
                     description="New context key for next turn"
                 ),
                 PortSpec(
+                    name="context_data",
+                    data_type=DataType.JSON,
+                    description="Full context data (for inspection or passthrough)"
+                ),
+                PortSpec(
                     name="message_count",
                     data_type=DataType.TEXT,
                     description="Total messages in context"
@@ -79,7 +90,7 @@ class ImmutableChatNode(BaseNode):
                     data_type="select",
                     default="ollama",
                     description="LLM provider",
-                    constraints={"options": ["ollama", "anthropic"]}
+                    constraints={"options": ["ollama", "anthropic", "bedrock"]}
                 ),
                 ParameterSpec(
                     name="model",
@@ -105,19 +116,36 @@ class ImmutableChatNode(BaseNode):
                     data_type="boolean",
                     default=False,
                     description="Enable streaming response"
+                ),
+                ParameterSpec(
+                    name="context_data_dominant",
+                    data_type="boolean",
+                    default=False,
+                    description="Use context_data over context_key when both provided"
                 )
             ]
         )
         super().__init__(spec)
         
-        # Initialize Ollama adapter
-        self.ollama = OllamaAdapter()
+        # Initialize provider adapters
+        self.adapters = {
+            "ollama": OllamaAdapter(),
+            "anthropic": AnthropicAdapter()
+        }
+        
+        # Add bedrock if available
+        try:
+            from ..core.smart_context import BedrockAdapter
+            self.adapters["bedrock"] = BedrockAdapter()
+        except ImportError:
+            pass  # Bedrock not available
     
     async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
         """Execute immutable chat with content-addressable contexts."""
         # Get inputs
         message = context.get_input_value(node_data.node_id, "message")
         prev_context_key = context.get_input_value(node_data.node_id, "context_key")
+        prev_context_data = context.get_input_value(node_data.node_id, "context_data")
         
         # No global fallback - if no context_key input is connected, start fresh
         # This ensures explicit behavior and prevents context bleeding between LLMs
@@ -139,27 +167,74 @@ class ImmutableChatNode(BaseNode):
         
         provider = context.get_input_value(node_data.node_id, "provider") or params.get("provider", "ollama")
         streaming = params.get("streaming", False)
+        context_data_dominant = params.get("context_data_dominant", False)
         
         if not message:
             return {
                 "response": "Error: No message provided",
                 "context_key": prev_context_key or "empty",
+                "context_data": {"messages": [], "error": "no_message"},
                 "message_count": "0"
             }
         
         try:
-            # Load previous context if exists
+            # Context supremacy logic implementation
             prev_messages = []
-            if prev_context_key:
+            context_source = "fresh"  # Track where context came from
+            
+            # Apply supremacy model
+            if prev_context_data and prev_context_key:
+                # Both provided - check dominance setting
+                if context_data_dominant:
+                    if isinstance(prev_context_data, dict) and "messages" in prev_context_data:
+                        prev_messages = prev_context_data["messages"]
+                        context_source = "context_data"
+                    else:
+                        # Invalid context_data, fall back to context_key
+                        prev_context = await content_addressable_context.load_context(prev_context_key)
+                        if prev_context:
+                            prev_messages = prev_context["messages"]
+                            context_source = "context_key_fallback"
+                else:
+                    # context_key dominant (default)
+                    prev_context = await content_addressable_context.load_context(prev_context_key)
+                    if prev_context:
+                        prev_messages = prev_context["messages"]
+                        context_source = "context_key"
+                    else:
+                        # context_key failed, fall back to context_data
+                        if isinstance(prev_context_data, dict) and "messages" in prev_context_data:
+                            prev_messages = prev_context_data["messages"]
+                            context_source = "context_data_fallback"
+            elif prev_context_data:
+                # Only context_data provided
+                if isinstance(prev_context_data, dict) and "messages" in prev_context_data:
+                    prev_messages = prev_context_data["messages"]
+                    context_source = "context_data"
+            elif prev_context_key:
+                # Only context_key provided
                 prev_context = await content_addressable_context.load_context(prev_context_key)
                 if prev_context:
                     prev_messages = prev_context["messages"]
+                    context_source = "context_key"
+            # If neither provided, prev_messages stays empty (fresh start)
             
             # If no previous messages, start with system prompt
             if not prev_messages:
                 prev_messages = [{"role": "system", "content": system_prompt}]
+                context_source = "fresh"
             
-            # Create context data for Ollama
+            # Get provider adapter
+            adapter = self.adapters.get(provider)
+            if not adapter:
+                return {
+                    "response": f"Error: Unsupported provider '{provider}'",
+                    "context_key": prev_context_key or "error",
+                    "context_data": {"messages": prev_messages, "error": f"provider_{provider}_not_found"},
+                    "message_count": str(len(prev_messages))
+                }
+            
+            # Create context data for provider
             context_data = {
                 "messages": prev_messages,
                 "provider_type": "full_history"
@@ -167,23 +242,35 @@ class ImmutableChatNode(BaseNode):
             
             if streaming:
                 # Generate streaming response
-                stream_generator, _ = await self.ollama.generate_with_context_streaming(
-                    context_data=context_data,
-                    new_message=message,
-                    model=model,
-                    temperature=temperature
-                )
-                
-                # Collect full response from stream
-                response_parts = []
-                async for chunk in stream_generator:
-                    response_parts.append(chunk)
-                
-                response = "".join(response_parts)
-                
+                if hasattr(adapter, 'generate_with_context_streaming'):
+                    stream_generator, _ = await adapter.generate_with_context_streaming(
+                        context_data=context_data,
+                        new_message=message,
+                        model=model,
+                        temperature=temperature
+                    )
+                    
+                    # Collect full response from stream
+                    response_parts = []
+                    async for chunk in stream_generator:
+                        if isinstance(chunk, str):
+                            response_parts.append(chunk)
+                        elif isinstance(chunk, dict) and chunk.get('_context_update'):
+                            # Handle context update from streaming
+                            context_data = chunk
+                    
+                    response = "".join(response_parts)
+                else:
+                    # Fall back to non-streaming if streaming not supported
+                    response, _ = await adapter.generate_with_context(
+                        context_data=context_data,
+                        new_message=message,
+                        model=model,
+                        temperature=temperature
+                    )
             else:
                 # Generate response using non-streaming
-                response, _ = await self.ollama.generate_with_context(
+                response, _ = await adapter.generate_with_context(
                     context_data=context_data,
                     new_message=message,
                     model=model,
@@ -196,12 +283,22 @@ class ImmutableChatNode(BaseNode):
                 {"role": "assistant", "content": response}
             ]
             
+            # Create full context data for output
+            output_context_data = {
+                "messages": new_messages,
+                "provider_type": "full_history",
+                "provider": provider,
+                "model": model,
+                "context_source": context_source
+            }
+            
             # Store new immutable context
             new_context_key = await content_addressable_context.store_context(new_messages)
             
             return {
                 "response": response,
                 "context_key": new_context_key,
+                "context_data": output_context_data,
                 "message_count": str(len(new_messages))
             }
             
@@ -209,6 +306,7 @@ class ImmutableChatNode(BaseNode):
             return {
                 "response": f"Error: {str(e)}",
                 "context_key": prev_context_key or "error",
+                "context_data": {"messages": [], "error": str(e)},
                 "message_count": "0"
             }
     

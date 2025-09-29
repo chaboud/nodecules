@@ -32,4 +32,4 @@ COPY . .
 EXPOSE 8000
 
 # Default command
-CMD ["uvicorn", "nodecules.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["poetry", "run", "uvicorn", "nodecules.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -13,14 +13,11 @@ downcast from `ExecutionContext` via `isinstance`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import Any, List, Optional
 
+from .annotations import AnnotationIndex, AnnotationRef
 from .time import TimeRange, TimeSource
 from .types import ExecutionContext
-
-if TYPE_CHECKING:
-    # Forward ref; AnnotationRef lands in annotations.py in PR-n2.
-    from .annotations import AnnotationRef
 
 
 @dataclass
@@ -35,10 +32,7 @@ class ChunkedContext(ExecutionContext):
     # defaulted parent fields stays legal.
     current_window: Optional[TimeRange] = None
     time_source: Optional[TimeSource] = None
-    # Annotation index: `{window_key -> [AnnotationRef]}`. Populated by the
-    # scheduler for windows that intersect existing annotations. Static
-    # nodes ignore this.
-    _annotation_index: dict = field(default_factory=dict, repr=False)
+    annotation_index: Optional[AnnotationIndex] = None
 
     def get_inputs_in_window(
         self,
@@ -60,21 +54,30 @@ class ChunkedContext(ExecutionContext):
     def get_annotations_in_window(
         self,
         window: TimeRange,
-    ) -> List["AnnotationRef"]:
+    ) -> List[AnnotationRef]:
         """Return annotations whose `target_window` intersects `window`.
 
-        Placeholder until PR-n2 lands the annotation index.
+        Empty list when there is no `annotation_index` bound (static path
+        or a subgraph that hasn't been wired to one).
         """
-        return []
+        if self.annotation_index is None:
+            return []
+        return self.annotation_index.annotations_in_window(window)
 
     def annotation_hash_for_window(self, window: TimeRange) -> Optional[str]:
         """Canonical hash over annotations intersecting `window`.
 
-        Returns `None` when no annotations apply; scheduler logic treats
-        that as "annotation_hash is omitted from the cache key," which
-        keeps static-node cache keys stable. Placeholder until PR-n2.
+        Returns `None` when there is no annotation index bound — the
+        cache key should then be built with `annotation_hash=None`,
+        reproducing static-node behavior. When an index IS bound the
+        return value is the empty-set hash for "no annotations here"
+        (distinct from `None`), so a node that reads annotations pays
+        the full cache-invalidation cost whenever annotations in its
+        window change.
         """
-        return None
+        if self.annotation_index is None:
+            return None
+        return self.annotation_index.annotation_hash_for_window(window)
 
 
 __all__ = ["ChunkedContext"]

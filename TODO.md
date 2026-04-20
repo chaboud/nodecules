@@ -6,22 +6,6 @@ context is genuinely lost otherwise.
 
 ## Open
 
-### Quarantine chat-context subsystem out of `core/`
-**Category:** architecture, layering hygiene
-**Opened:** 2026-04-20
-**Context:** `backend/nodecules/core/smart_context.py` and
-`content_addressable_context.py` import `redis` at module top level and
-instantiate a postgres engine at import time. That makes every importer of
-`core/` — including static-graph unit tests — require a redis install and a
-live postgres, directly violating the new `CLAUDE.md` invariant #4 ("core
-library works without Postgres/Redis"). For the stenota pipeline we're
-building, redis adds zero value: JSONL-on-filesystem is already sub-ms for our
-read pattern, and nothing hot-reads chat histories. Move the chat-context
-caching under `services/` or `api/`, and make `builtin_nodes` not pull it in at
-static import time (lazy-import or registry indirection). This lands before
-PR-n2 (node output cache) so the new cache layer can live cleanly in `core/`
-without inheriting the same sin.
-
 ### Graph-engine overhead vs. direct pipeline baseline
 **Category:** performance, architecture
 **Opened:** 2026-04-20
@@ -37,4 +21,5 @@ scheduler, or whether the abstraction tax is fine. Do not guess; measure.
 
 ## Done
 
-(none yet)
+### Quarantine chat-context subsystem out of `core/`
+**Closed:** 2026-04-20 (PR-n1.5). `plugins/builtin_nodes.py` no longer pulls the chat stack; service-backed nodes register from FastAPI startup via `plugins/service_nodes.py`. `models/database.py` lazy-instantiates engine + session factory. `core/` now imports clean in a pydantic-only venv.

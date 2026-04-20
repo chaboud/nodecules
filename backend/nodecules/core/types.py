@@ -4,14 +4,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
 
 class NodeStatus(str, Enum):
     """Node execution status."""
     PENDING = "pending"
-    RUNNING = "running" 
+    RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -26,7 +26,41 @@ class DataType(str, Enum):
     JSON = "json"
     FILE = "file"
     CONTEXT = "context"
+    TIME_RANGE = "time_range"
     ANY = "any"
+
+
+# Temporal-scheduling literals (see TEMPORALITY.md). Declared as Literals
+# rather than Enums so dataclass defaults stay trivially JSON-serializable.
+TemporalKind = Literal["static", "windowed", "streaming", "reanneal"]
+EmitPolicy = Literal["streaming", "on_window_close", "on_graph_close"]
+Mutability = Literal["wet", "drying", "dry", "smudged"]
+WindowAlignment = Literal["origin", "boundary"]
+
+
+@dataclass
+class WindowSpec:
+    """Window cadence for a `temporal_kind == "windowed"` node.
+
+    All times are integer milliseconds. `stride_ms < size_ms` produces
+    overlapping windows. `min_upstream_coverage` is the fraction of the
+    window that must have upstream data before the node is considered
+    ready to run for that window.
+    """
+    size_ms: int
+    stride_ms: int
+    align: WindowAlignment = "origin"
+    min_upstream_coverage: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.size_ms <= 0:
+            raise ValueError(f"WindowSpec size_ms must be > 0, got {self.size_ms}")
+        if self.stride_ms <= 0:
+            raise ValueError(f"WindowSpec stride_ms must be > 0, got {self.stride_ms}")
+        if not (0.0 <= self.min_upstream_coverage <= 1.0):
+            raise ValueError(
+                f"WindowSpec min_upstream_coverage must be in [0.0, 1.0], got {self.min_upstream_coverage}"
+            )
 
 
 @dataclass
@@ -58,9 +92,14 @@ class ResourceRequirement:
     timeout_seconds: int = 300
 
 
-@dataclass 
+@dataclass
 class NodeSpec:
-    """Node type specification."""
+    """Node type specification.
+
+    Temporality-related fields (`temporal_kind`, `window_spec`, `emit_policy`,
+    `supports_reanneal`) are additive: they default to values that reproduce
+    the pre-temporality behavior. Existing nodes do not need to be modified.
+    """
     node_type: str
     display_name: str
     description: str
@@ -69,6 +108,11 @@ class NodeSpec:
     outputs: List[PortSpec] = field(default_factory=list)
     parameters: List[ParameterSpec] = field(default_factory=list)
     resource_requirements: ResourceRequirement = field(default_factory=ResourceRequirement)
+    # --- Temporal scheduling (feat/temporality). See TEMPORALITY.md. ---
+    temporal_kind: TemporalKind = "static"
+    window_spec: Optional[WindowSpec] = None
+    emit_policy: EmitPolicy = "on_window_close"
+    supports_reanneal: bool = False
 
 
 @dataclass

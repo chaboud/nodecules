@@ -650,14 +650,16 @@ class OutputNode(BaseNode):
         }
 
 
-# Import core chat nodes  
-from .smart_chat_node import SMART_CHAT_NODES
-from .immutable_chat_node import IMMUTABLE_CHAT_NODES
-from .context_nodes import CONTEXT_NODES
-# Import specialized nodes
-from .graph_nodes import GRAPH_NODES
-
-# Registry of built-in nodes
+# Registry of stateless built-in nodes. These do not touch Postgres or
+# Redis and are safe to import from anywhere in the core library.
+#
+# The chat/context/graph-as-node families (SMART_CHAT_NODES,
+# IMMUTABLE_CHAT_NODES, CONTEXT_NODES, GRAPH_NODES) depend on the chat-
+# context subsystem, which currently requires a live Postgres + Redis.
+# They are registered lazily from `nodecules.plugins.service_nodes`
+# during FastAPI startup — not imported here — so that the core library
+# can be used as a library against only the filesystem. See CLAUDE.md
+# invariant #4.
 BUILTIN_NODES = {
     "input": InputNode,
     "text_transform": TextTransformNode,
@@ -667,8 +669,4 @@ BUILTIN_NODES = {
     "json_replace": JsonReplaceNode,
     "json_collect": JsonCollectNode,
     "output": OutputNode,
-    **SMART_CHAT_NODES,  # Smart context-aware chat
-    **IMMUTABLE_CHAT_NODES,  # Immutable content-addressable chat
-    **CONTEXT_NODES,  # Context storage and key generation
-    **GRAPH_NODES,  # Graph-as-node functionality
 }

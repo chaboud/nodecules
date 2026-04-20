@@ -42,7 +42,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type
 
+import time as _time
+
 from .annotations import AnnotationIndex, content_hashes_for_window
+from .events import EventSink, ExecutionEvent, NullEventSink
 from .executor import ExecutionError, GraphExecutor
 from .graph import GraphExecutionPlanner
 from .node_cache import (
@@ -134,12 +137,24 @@ class TemporalScheduler:
         time_source: Optional[TimeSource] = None,
         cache: Optional[NodeCache] = None,
         annotation_index: Optional[AnnotationIndex] = None,
+        event_sink: Optional[EventSink] = None,
     ) -> None:
         self._node_registry = node_registry
         self._executor = GraphExecutor(node_registry)
-        self._time_source: TimeSource = time_source or FileClock()
-        self._cache: NodeCache = cache or InMemoryNodeCache()
+        # `is None` guards throughout — NOT `or` — because containers
+        # with `__len__ == 0` are falsy in Python. An empty
+        # `InMemoryNodeCache` or `ListEventSink` passed by the caller
+        # would otherwise be silently replaced by a fresh default.
+        self._time_source: TimeSource = (
+            time_source if time_source is not None else FileClock()
+        )
+        self._cache: NodeCache = (
+            cache if cache is not None else InMemoryNodeCache()
+        )
         self._annotation_index = annotation_index
+        self._events: EventSink = (
+            event_sink if event_sink is not None else NullEventSink()
+        )
 
         # Early check — we don't support streaming in this PR. Fail at
         # construction so callers know before a long batch.
@@ -185,6 +200,15 @@ class TemporalScheduler:
         for node_id in graph.nodes:
             context.set_node_status(node_id, NodeStatus.PENDING)
 
+        self._emit(
+            ExecutionEvent(
+                kind="graph_start",
+                graph_id=graph.graph_id,
+                execution_id=context.execution_id,
+                meta={"total_duration_ms": total_duration_ms},
+            )
+        )
+
         planner = GraphExecutionPlanner(graph)
         order = planner.get_execution_order()
 
@@ -202,7 +226,7 @@ class TemporalScheduler:
                 if emit == "on_graph_close":
                     # Static + on_graph_close: defer until the end.
                     continue
-                await self._executor._execute_node(context, node_id)
+                await self._run_static_with_events(context, node_id, spec)
             elif kind == "windowed":
                 await self._run_windowed_node(
                     context, sched, node_id, total_range
@@ -234,10 +258,18 @@ class TemporalScheduler:
                 # that want to know what span they're reducing over can
                 # read it.
                 context.current_window = total_range
-                await self._executor._execute_node(context, node_id)
+                await self._run_static_with_events(context, node_id, spec)
                 context.current_window = None
 
         context.completed_at = datetime.utcnow()
+        self._emit(
+            ExecutionEvent(
+                kind="graph_close",
+                graph_id=graph.graph_id,
+                execution_id=context.execution_id,
+            )
+        )
+        self._events.close()
         return context
 
     def get_windowed_output(
@@ -328,12 +360,29 @@ class TemporalScheduler:
                 cached if isinstance(cached, dict) else {"_cached": cached}
             )
             sched.completed_windowed.add((node_id, window_digest))
+            self._emit_node(
+                "cache_hit",
+                context=context,
+                node_data=node_data,
+                window=window,
+                cache_key_digest=key.digest(),
+            )
             logger.debug("cache hit %s @ %s", node_id, window)
             return
+
+        cache_key_digest = key.digest()
+        self._emit_node(
+            "node_start",
+            context=context,
+            node_data=node_data,
+            window=window,
+            cache_key_digest=cache_key_digest,
+        )
 
         # Cache miss — execute against a per-window context view.
         prev_window = context.current_window
         context.current_window = window
+        started_wall = _time.monotonic()
         try:
             if node_data.node_type not in self._node_registry:
                 raise ExecutionError(f"Unknown node type: {node_data.node_type}")
@@ -361,13 +410,116 @@ class TemporalScheduler:
                 context.node_outputs.pop(node_id, None)
 
             self._cache.put(key, outputs)
+            latency_ms = int((_time.monotonic() - started_wall) * 1000)
+            self._emit_node(
+                "node_complete",
+                context=context,
+                node_data=node_data,
+                window=window,
+                cache_key_digest=cache_key_digest,
+                latency_ms=latency_ms,
+            )
+            self._emit_node(
+                "window_emit",
+                context=context,
+                node_data=node_data,
+                window=window,
+                cache_key_digest=cache_key_digest,
+            )
             logger.debug("ran %s @ %s", node_id, window)
         except Exception as exc:
             context.set_node_status(node_id, NodeStatus.FAILED)
             context.errors[node_id] = str(exc)
+            self._emit_node(
+                "node_failed",
+                context=context,
+                node_data=node_data,
+                window=window,
+                cache_key_digest=cache_key_digest,
+                error=str(exc),
+            )
             raise ExecutionError(f"Node {node_id} failed at window {window}: {exc}") from exc
         finally:
             context.current_window = prev_window
+
+    async def _run_static_with_events(
+        self,
+        context: ChunkedContext,
+        node_id: str,
+        spec,
+    ) -> None:
+        """Delegate to `GraphExecutor._execute_node` but book-end with events.
+
+        Static nodes don't participate in the windowed cache by default
+        in PR-n3; the event log still captures their execution so the
+        timeline view covers the whole graph.
+        """
+        node_data = context.graph.nodes[node_id]
+        self._emit_node(
+            "node_start",
+            context=context,
+            node_data=node_data,
+            window=context.current_window,
+        )
+        started = _time.monotonic()
+        try:
+            await self._executor._execute_node(context, node_id)
+        except Exception as exc:
+            self._emit_node(
+                "node_failed",
+                context=context,
+                node_data=node_data,
+                window=context.current_window,
+                error=str(exc),
+            )
+            raise
+        latency_ms = int((_time.monotonic() - started) * 1000)
+        self._emit_node(
+            "node_complete",
+            context=context,
+            node_data=node_data,
+            window=context.current_window,
+            latency_ms=latency_ms,
+        )
+
+    # --- Event helpers --------------------------------------------------
+
+    def _emit(self, event: ExecutionEvent) -> None:
+        self._events.emit(event)
+
+    def _emit_node(
+        self,
+        kind,
+        *,
+        context: ChunkedContext,
+        node_data: NodeData,
+        window: Optional[TimeRange] = None,
+        cache_key_digest: Optional[str] = None,
+        latency_ms: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Emit a node-scoped event, auto-filling common fields."""
+        meeting_ts: Optional[int]
+        if window is not None:
+            meeting_ts = window.start_ms
+        else:
+            meeting_ts = None
+
+        self._emit(
+            ExecutionEvent(
+                kind=kind,
+                graph_id=context.graph.graph_id,
+                execution_id=context.execution_id,
+                meeting_ts_ms=meeting_ts,
+                node_id=node_data.node_id,
+                node_type=node_data.node_type,
+                node_version=self._node_version(node_data),
+                window=window,
+                cache_key_digest=cache_key_digest,
+                latency_ms=latency_ms,
+                error=error,
+            )
+        )
 
     def _collect_inputs_for_node(
         self, context: ChunkedContext, node_id: str

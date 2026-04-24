@@ -373,6 +373,74 @@ class TestStreamingRejected:
 # --- Static-only regression ----------------------------------------------
 
 
+class TestSpecOverrides:
+    async def test_windowed_via_node_data_params(self) -> None:
+        """A primitive with a static default spec can run windowed when
+        `NodeData.parameters` overrides `temporal_kind` + `window_spec`.
+
+        This is the shader-graph posture: one Python class, many
+        behaviors via per-instance configuration.
+        """
+
+        class GenericSummer(BaseNode):
+            """Primitive with default static spec; gets windowed via params."""
+
+            NODE_TYPE = "test.generic_summer"
+
+            def __init__(self) -> None:
+                super().__init__(
+                    NodeSpec(
+                        node_type=self.NODE_TYPE,
+                        display_name="Generic Summer",
+                        description="Sums items; window behavior configured per-instance.",
+                        inputs=[PortSpec(name="items", data_type=DataType.JSON)],
+                        outputs=[PortSpec(name="total", data_type=DataType.JSON)],
+                    )
+                )
+
+            async def execute(self, context, node_data):
+                items = context.get_input_value(node_data.node_id, "items") or []
+                if not isinstance(context, ChunkedContext) or context.current_window is None:
+                    return {"total": sum(i["n"] for i in items)}
+                w = context.current_window
+                return {"total": sum(i["n"] for i in items if w.contains(int(i["t"])))}
+
+        graph = GraphData(
+            graph_id="override",
+            nodes={
+                "src": NodeData(
+                    node_id="src",
+                    node_type=ListInputNode.NODE_TYPE,
+                    parameters={"items": [{"t": 100, "n": 1}, {"t": 1_100, "n": 10}]},
+                ),
+                "summer": NodeData(
+                    node_id="summer",
+                    node_type=GenericSummer.NODE_TYPE,
+                    parameters={
+                        "temporal_kind": "windowed",
+                        "window_spec": {"size_ms": 1_000, "stride_ms": 1_000},
+                    },
+                ),
+            },
+            edges=[
+                EdgeData(
+                    edge_id="e",
+                    source_node="src",
+                    source_port="items",
+                    target_node="summer",
+                    target_port="items",
+                ),
+            ],
+        )
+        registry = {
+            ListInputNode.NODE_TYPE: ListInputNode,
+            GenericSummer.NODE_TYPE: GenericSummer,
+        }
+        sched = TemporalScheduler(registry, time_source=FileClock())
+        ctx = await sched.run_batch(graph, total_duration_ms=2_000)
+        assert ctx.node_outputs["summer"]["total"] == [1, 10]
+
+
 class TestStaticRegression:
     async def test_pure_static_graph_unchanged(self) -> None:
         """A graph with only static nodes runs under the scheduler

@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Type
 
+import dataclasses
 import time as _time
 
 from .annotations import AnnotationIndex, content_hashes_for_window
@@ -561,15 +562,25 @@ class TemporalScheduler:
                 )
 
     def _get_spec(self, node_data: NodeData):
-        """Instantiate a node just to read its spec.
+        """Instantiate a node to read its spec, then apply per-instance
+        parameter overrides.
 
-        Cheap — node `__init__` is pure Python. Cached per-scheduler in a
-        dict to amortize for graphs with many of the same node type.
+        Node types are *primitives* (think shader-graph nodes) that get
+        instantiated with configuration. A generic `llm.tool_loop`
+        primitive, for example, may be used as a static on_graph_close
+        lens in one place and a windowed summarizer in another, differing
+        only in `NodeData.parameters`. Applying overrides here lets the
+        scheduler enumerate windows / emit policies correctly for each
+        instance without requiring a distinct Python class per use.
+
+        Overridable fields: `temporal_kind`, `emit_policy`,
+        `supports_reanneal`, `window_spec`.
         """
         cls = self._node_registry.get(node_data.node_type)
         if cls is None:
             raise ExecutionError(f"Unknown node type: {node_data.node_type}")
-        return cls().spec
+        spec = cls().spec
+        return _apply_param_overrides(spec, node_data.parameters or {})
 
     def _node_version(self, node_data: NodeData) -> str:
         """Node version string used in cache keys. Defaults to "0.1.0"
@@ -593,6 +604,30 @@ class TemporalScheduler:
                 "scheduler context not bound; call run_batch() before get_windowed_output()"
             )
         return got
+
+
+def _apply_param_overrides(spec, params: Dict[str, Any]):
+    """Return a `NodeSpec` with instance-level overrides applied.
+
+    Leaves `spec` untouched if `params` contains no override keys —
+    keeps pre-existing nodes unaffected.
+    """
+    overrides: Dict[str, Any] = {}
+    if "temporal_kind" in params:
+        overrides["temporal_kind"] = params["temporal_kind"]
+    if "emit_policy" in params:
+        overrides["emit_policy"] = params["emit_policy"]
+    if "supports_reanneal" in params:
+        overrides["supports_reanneal"] = bool(params["supports_reanneal"])
+    if "window_spec" in params and params["window_spec"] is not None:
+        ws = params["window_spec"]
+        if isinstance(ws, WindowSpec):
+            overrides["window_spec"] = ws
+        elif isinstance(ws, dict):
+            overrides["window_spec"] = WindowSpec(**ws)
+    if not overrides:
+        return spec
+    return dataclasses.replace(spec, **overrides)
 
 
 __all__ = ["TemporalScheduler", "compute_windows"]

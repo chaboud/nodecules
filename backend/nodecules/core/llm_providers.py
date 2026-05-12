@@ -52,7 +52,10 @@ class ToolSchema:
 
     name: str
     description: str
-    parameters: Dict[str, Any]  # JSON Schema for the args object
+    # JSON Schema for the args object. compare=False because Dict[str, Any]
+    # isn't hashable; ToolSchema equality (and hash) reduces to name+desc,
+    # which is the level callers de-dup at.
+    parameters: Dict[str, Any] = field(compare=False)
 
 
 @dataclass(frozen=True)

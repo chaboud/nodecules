@@ -33,34 +33,77 @@ substrate; the JSONL files are the event log; the cache directory IS the
 derivation projection; the `@tool` registry IS the capability layer. We
 formalize, generalize, and fill gaps — we don't replace.
 
+## On stenota-lite
+
+`stenota-lite` is a **control group**, not a permanent fixture. It exists
+to let us characterize the perf cost of nodecules' temporal scheduling +
+caching against a hand-rolled baseline, and to catch correctness drift
+while both paths are alive. **Once nodecules has proven itself
+non-shit-show on real meetings, stenota-lite retires.** The invariants
+implied by lite's existence (no nodecules dependency, two TimeRange
+types, two-call-site schema updates) expire when lite does. Until then,
+schema coherence between lite and graph is maintained **semi-manually**
+— both paths import the same Pydantic models from
+`stenota/core/models.py`; changes touch both call sites by hand. That's
+cheap enough.
+
+Don't optimize for keeping lite around forever; optimize for making
+lite easy to delete cleanly.
+
 ## What stenota does NOT yet have (the real gaps)
 
 1. **`cache/` is never evicted.** Grows unboundedly. No LRU, no size cap, no
-   TTL. Needed.
+   TTL. **(Closing in PR-n4.)**
 2. **No `is_deterministic` flag on nodes.** The cache-vs-archive split is
    maintained by hand via the on-graph-close finalize pattern. Works for
-   summarizers; doesn't generalize.
+   summarizers; doesn't generalize. **(Closing in PR-n4.)**
 3. **No strip API.** Consumers go through `iter_jsonl(sc / CLAIMS_L2, ...)` +
    filter by hand. Cycle prevention is by convention, not validation.
+   **(Pull API closing in PR-n4; cycle validator in PR-n7.)**
 4. **No subscription / push API.** v0.2 attention-requests would have to poll
-   without it.
+   without it. **(Closing in PR-n6.)**
 5. **No IIR pre-roll / settling-time concept.** No node today is IIR-shaped,
    but as soon as one is (rolling notes feeding sectional summaries feeding
    rolling notes), the scheduler has no pre-roll machinery.
+   **(Closing in PR-n7.)**
 6. **`run_batch` enumerates windows up front.** Can't host an event-driven
    live loop. Stenota v0.5+ live mode needs the rewrite.
+   **(Closing in PR-n7.)**
 7. **Provider adapter is chat-shaped.** No tool-use, no JSON-schema. Stenota's
    `agent.py` calls Ollama directly; the docstring already says "future: add
-   provider adapters; only `_invoke_chat` changes."
+   provider adapters; only `_invoke_chat` changes." **(Closing in PR-n9.)**
 8. **`ExecutionContext` carries env via `execution_inputs["sidecar_path"]`.**
    Every node redoes the same lookup. Typed env declarations are absent.
+   **(Closing in PR-n8.)**
 
 ## Phases, in stenota-milestone order
 
 Each phase is one or more PRs labeled `PR-n<N>-<slug>`. Each lands additively
 and passes the static-DAG regression suite + stenota's smoke run as a gate.
 
-### PR-n4-strips — Strip naming + lazy iterator API
+### PR-n4-strips-and-archive — Strip API + cache eviction + is_deterministic
+
+**In progress on `claude/recon-nodecules-t9Dqq`.**
+
+- `NodeSpec.is_deterministic` (default True, additive).
+- `core/strips.py`: `StripSpec`, `StripRegistry`, `StripView` — lazy iterator
+  API over sidecar JSONL files. Duck-typed via
+  `schema_cls.model_validate_json`. Time-range queries (`in_range`,
+  `before`, `after`) and ordinal indexing (`strip[me - 1]`, `strip.at(i)`).
+- `ChunkedContext.strip(name)` resolves the registry + sidecar path.
+- `FilesystemNodeCache(root, max_size_bytes=..., max_entries=...)` — LRU
+  eviction sweeping oldest deterministic entries first; nondeterministic
+  entries pinned (irreplaceable). InMemoryNodeCache grows the same
+  contract.
+- Scheduler propagates `spec.is_deterministic` to `cache.put()`.
+- Tests: `test_strips.py` (25 cases), `test_cache_eviction.py` (11),
+  `test_is_deterministic.py` (6).
+
+**Cycle validator deferred** to PR-n7 — needs the dirty-queue infrastructure
+to make sense of within-window vs across-window dependencies.
+
+Not in this PR: stenota-side strip registration + node migration. That's
+PR-s2 on the stenota side.
 
 Strips as a **naming convention** over the existing sidecar JSONL files plus a
 lazy iterator API. No new storage. Maps directly to stenota's L0–L4 hierarchy:
@@ -75,42 +118,18 @@ API:
 
 ```python
 strip = ctx.strip("strips/turns/diarized")
-prev_turn = strip[me - 1]
+prev_turn = strip.at(me - 1)
 recent = strip[me - 5 : me]
 in_window = strip.in_range(time_range)
 prior_section = strip.before(my_time_range)
 ```
 
-Indexing has two flavors: absolute (`strip[42]`, `strip[-1]`) and self-relative
-(`strip[me - 1]`). Forward indexing within own strip rejected at graph load.
-Cross-strip forward reads forbidden by temporal monotonicity.
-
-Cycle validator walks declared strip dependencies at graph instantiation.
-
-### PR-n5-cache-evict — Cache vs archive, with eviction
-
-`is_deterministic: bool` on `NodeSpec` (default True for backward compat, but
-LLM-bound stenota nodes set it False). The cache layer respects it:
-
-- Deterministic node → `cache/` (content-addressed JSON, evictable). Re-derive
-  on miss.
-- Nondeterministic node → *must* declare an archive destination (e.g.
-  `claims/L2.jsonl`); cache miss does NOT silently regenerate — it's a real
-  miss because the original output can't be reproduced.
-
-Eviction policy on `cache/`: LRU + size cap, configurable per sidecar. Default
-cap reasonable for the meeting case; robot lifelong sessions configure higher
-or disable.
-
-Stenota's existing on-graph-close `RenderMarkdownNode` becomes one specific
-use of this pattern, not the only mechanism.
-
 ### PR-n6-subs — Strip subscriptions (push API)
 
-The push counterpart to the pull API from PR-n4. A subscriber registers
-interest in a strip; the scheduler / writer notifies on matching events.
-Default visibility: canonical-phase events at time ≤ subscriber's `now`.
-Explicit configuration scopes:
+The push counterpart to PR-n4's pull API. A subscriber registers interest in
+a strip; the scheduler / writer notifies on matching events. Default
+visibility: canonical-phase events at time ≤ subscriber's `now`. Explicit
+configuration scopes:
 
 ```python
 sub = ctx.subscribe(
@@ -153,6 +172,8 @@ Replaces `run_batch`'s batch-startup enumeration with an event-driven loop:
 - **Three modes, one engine**: single-shot (no windows, no queue — today's
   static DAG), continuous low-latency (hare-only), offline high-latency
   (both workers, initial flood of stale).
+- **Strip-dependency cycle validator** at graph load (deferred here from
+  PR-n4).
 
 This is the largest single PR. Rename `run_batch` → `run_batch_oneshot` here
 (now justified by the API change anyway). Stenota's existing v0.1 pipeline
@@ -163,7 +184,8 @@ runs identically under the new scheduler as a gate.
 Disentangle `ExecutionContext` into three things:
 
 - **`Environment`** (read-mostly ambient capabilities): substrate root,
-  providers, clock, annotation index, sidecar path. Declared on `NodeSpec` as
+  providers, clock, annotation index, sidecar path, strip registry.
+  Declared on `NodeSpec` as
   `reads_env=["substrate", "sidecar", "llm.default", "time"]`.
 - **Append-only sinks**: archive appenders, signal emitters, log sinks.
   Declared as `writes_env=["strips/claims/L2", "signals.attention"]`.
@@ -235,17 +257,22 @@ Anthropic's structured outputs, Bedrock's tool-use schema). Stenota's
    example graph, and test passes before and after every phase. The 136
    temporal tests on `feat/temporality` and the static-DAG tests on `main`
    are the regression suite.
-2. **Stenota's `stenota_lite/` stays nodecules-free.** It's the schema /
-   perf control group. Any nodecules API a stenota-graph node adopts must
-   have a corresponding stenota-lite-friendly equivalent.
-3. **Schema compatibility between stenota-lite and stenota-graph.** Both
-   paths produce byte-for-byte compatible sidecars. Don't break this.
+2. **Stenota's `stenota_lite/` stays nodecules-free — while lite exists.**
+   It's the perf + correctness control group during the rollout. Once
+   nodecules has proven itself, lite retires and this invariant (plus the
+   types-stay-separate invariants below) goes with it.
+3. **Schema coherence between lite and graph is maintained semi-manually.**
+   Both paths import the same Pydantic models from `stenota/core/models.py`;
+   schema changes touch both call sites by hand. Acceptable cost while
+   lite is alive.
 4. **Stenota's `Confidence`, `StructuredClaim`, `Mutability`, `AnnotationRef`
    schemas in `stenota/core/models.py` are the canonical form.** Nodecules
-   doesn't redefine these.
+   doesn't redefine these. (When lite retires, these may migrate into
+   nodecules; until then, stenota owns them.)
 5. **`nodecules.core.time.TimeRange` and `stenota.core.models.TimeRange` stay
-   structurally identical but distinct types.** Boundary conversion is
-   explicit (`SummarizerL2Node` already does it). Don't try to unify.
+   structurally identical but distinct types — while lite is alive.**
+   Boundary conversion is explicit (`SummarizerL2Node` already does it).
+   When lite retires, the two unify in nodecules.
 6. **Time is integer milliseconds, meeting-relative.**
 7. **`TimeSource` injected, never global.**
 8. **Cache-key stability for static deterministic nodes.** No semantic shifts
@@ -269,11 +296,12 @@ Anthropic's structured outputs, Bedrock's tool-use schema). Stenota's
 
 | Stenota milestone | Required nodecules support |
 |---|---|
-| v0.2 (VLM + attention-request queue + L3a + observability) | PR-n4 strips, PR-n5 cache-evict, PR-n6 subs |
+| v0.2 (VLM + attention-request queue + L3a + observability) | PR-n4 strips + cache-evict (this branch), PR-n6 subs |
 | v0.3 (`AnnotationNode` re-anneal + Tauri UI) | PR-n7 scheduler-v2 (re-anneal under tags) |
 | v0.4 (L3b + L4 + packaging) | PR-n8 env, PR-n9 providers (so Claude/Bedrock work cleanly) |
 | v0.5 (live mode) | PR-n7 already covers it; live = `WallClock` + hare-only worker |
 | robot integration (months out) | No additional nodecules work expected. Robot embeds `stenota` as a library and consumes the same MCP-shape registry. |
+| **stenota-lite retirement** | Unifies TimeRange types; lifts the no-nodecules-imports rule; collapses the two-call-site schema-update rule. Trigger: nodecules-integrated path validated on real meetings without surprises. |
 
 If the robot integration reveals genuinely-new requirements we haven't
 anticipated, that's a v2 nodecules conversation — not a Phase 9 of this

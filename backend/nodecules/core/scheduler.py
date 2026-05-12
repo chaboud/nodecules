@@ -21,6 +21,14 @@ Scope of this PR (PR-n3):
   removing annotations automatically smudges only the intersecting
   windows.
 
+PR-n4 additions:
+
+- `NodeSpec.is_deterministic` propagates through the cache layer.
+  Nondeterministic nodes' outputs are stored but flagged so the cache's
+  eviction policy pins them — a recorded LLM output is irreplaceable.
+  Default is True, preserving pre-PR-n4 behavior for every existing
+  node + every existing test.
+
 Out of scope (documented, not built):
 
 - **Streaming nodes** — `temporal_kind="streaming"` raises at construction.
@@ -410,7 +418,15 @@ class TemporalScheduler:
             else:
                 context.node_outputs.pop(node_id, None)
 
-            self._cache.put(key, outputs)
+            # PR-n4: route is_deterministic to the cache layer so eviction
+            # can pin nondeterministic outputs. `getattr` with default True
+            # tolerates spec shapes that pre-date PR-n4 (older plugin
+            # registrations or mocks).
+            self._cache.put(
+                key,
+                outputs,
+                is_deterministic=getattr(spec, "is_deterministic", True),
+            )
             latency_ms = int((_time.monotonic() - started_wall) * 1000)
             self._emit_node(
                 "node_complete",
@@ -625,6 +641,8 @@ def _apply_param_overrides(spec, params: Dict[str, Any]):
             overrides["window_spec"] = ws
         elif isinstance(ws, dict):
             overrides["window_spec"] = WindowSpec(**ws)
+    if "is_deterministic" in params:
+        overrides["is_deterministic"] = bool(params["is_deterministic"])
     if not overrides:
         return spec
     return dataclasses.replace(spec, **overrides)

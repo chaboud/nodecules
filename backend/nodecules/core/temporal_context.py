@@ -3,8 +3,9 @@
 Extends `ExecutionContext` with the fields a windowed node needs to behave
 deterministically: the current `TimeRange` being processed, the
 `TimeSource` driving the scheduler, the optional annotation index,
-(PR-n4) a strip registry + sidecar path for the strip pull API, and
-(PR-n6) an optional subscription manager for the push API.
+(PR-n4) a strip registry + sidecar path for the strip pull API,
+(PR-n6) an optional subscription manager for the push API, and
+(PR-n8) an optional Environment for capability + sink access.
 
 Static nodes never see one of these (they receive a plain
 `ExecutionContext`). Temporal nodes receive `ChunkedContext` and can
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from .annotations import AnnotationIndex, AnnotationRef
+from .environment import Environment
 from .strips import StripRegistry, StripView
 from .subscriptions import Subscription, SubscriptionManager, Visibility
 from .time import TimeRange, TimeSource
@@ -37,15 +39,15 @@ class ChunkedContext(ExecutionContext):
     time_source: Optional[TimeSource] = None
     annotation_index: Optional[AnnotationIndex] = None
     # PR-n4: strip registry + sidecar path together let `strip(name)` resolve
-    # a strip view over the current sidecar. Either field may be None when
-    # the caller doesn't need the strip API; both must be set (or sidecar
-    # discoverable via `execution_inputs["sidecar_path"]`) when `strip()`
-    # is called.
+    # a strip view over the current sidecar.
     strips: Optional[StripRegistry] = None
     sidecar: Optional[str] = None
     # PR-n6: subscription manager. Optional — nodes that don't use the push
     # API can leave this None.
     subscriptions: Optional[SubscriptionManager] = None
+    # PR-n8: typed environment (capabilities + sinks). When bound, `cap()`
+    # and `sink()` work; otherwise they raise.
+    environment: Optional[Environment] = None
 
     def get_inputs_in_window(
         self,
@@ -159,6 +161,32 @@ class ChunkedContext(ExecutionContext):
         return self.subscriptions.publish(
             strip_name, event, phase=phase, time_range=time_range
         )
+
+    # PR-n8: environment / capability access ---------------------------------
+
+    def cap(self, name: str) -> Any:
+        """Shortcut to get a capability from the bound `Environment`.
+
+        Raises if no environment is bound or the capability isn't present.
+        For optional capability access use `ctx.environment.has_capability(name)`
+        first or pass through `ctx.environment.get_capability(name)` and
+        handle the `KeyError`.
+        """
+        if self.environment is None:
+            raise RuntimeError(
+                "ChunkedContext.environment is not set; bind an Environment "
+                "to use cap()/sink()"
+            )
+        return self.environment.get_capability(name)
+
+    def sink(self, name: str) -> Any:
+        """Shortcut to get a sink from the bound `Environment`."""
+        if self.environment is None:
+            raise RuntimeError(
+                "ChunkedContext.environment is not set; bind an Environment "
+                "to use cap()/sink()"
+            )
+        return self.environment.get_sink(name)
 
 
 __all__ = ["ChunkedContext"]

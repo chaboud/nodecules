@@ -2,8 +2,9 @@
 
 Extends `ExecutionContext` with the fields a windowed node needs to behave
 deterministically: the current `TimeRange` being processed, the
-`TimeSource` driving the scheduler, the optional annotation index, and
-(PR-n4) a strip registry + sidecar path for the strip pull API.
+`TimeSource` driving the scheduler, the optional annotation index,
+(PR-n4) a strip registry + sidecar path for the strip pull API, and
+(PR-n6) an optional subscription manager for the push API.
 
 Static nodes never see one of these (they receive a plain
 `ExecutionContext`). Temporal nodes receive `ChunkedContext` and can
@@ -12,15 +13,14 @@ downcast from `ExecutionContext` via `isinstance`.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, List, Optional
 
 from .annotations import AnnotationIndex, AnnotationRef
 from .strips import StripRegistry, StripView
+from .subscriptions import Subscription, SubscriptionManager, Visibility
 from .time import TimeRange, TimeSource
-from .types import ExecutionContext
+from .types import DerivationPhase, ExecutionContext
 
 
 @dataclass
@@ -43,6 +43,9 @@ class ChunkedContext(ExecutionContext):
     # is called.
     strips: Optional[StripRegistry] = None
     sidecar: Optional[str] = None
+    # PR-n6: subscription manager. Optional — nodes that don't use the push
+    # API can leave this None.
+    subscriptions: Optional[SubscriptionManager] = None
 
     def get_inputs_in_window(
         self,
@@ -115,6 +118,47 @@ class ChunkedContext(ExecutionContext):
             )
         spec = self.strips.get(name)
         return StripView(spec, sc)
+
+    # PR-n6: subscription / publication --------------------------------------
+
+    def subscribe(
+        self,
+        strip_name: str,
+        visibility: Optional[Visibility] = None,
+    ) -> Subscription:
+        """Subscribe to a named strip.
+
+        Returns an async-iterable `Subscription`. Default visibility is
+        canonical-phase events at all times. Raises if no
+        `SubscriptionManager` is bound on this context.
+        """
+        if self.subscriptions is None:
+            raise RuntimeError(
+                "ChunkedContext.subscriptions is not set; bind a "
+                "SubscriptionManager before calling subscribe()"
+            )
+        return self.subscriptions.subscribe(strip_name, visibility)
+
+    def publish(
+        self,
+        strip_name: str,
+        event: Any,
+        *,
+        phase: DerivationPhase = DerivationPhase.CANONICAL,
+        time_range: Optional[TimeRange] = None,
+    ) -> int:
+        """Publish to a named strip.
+
+        No-op (returns 0) when no `SubscriptionManager` is bound — nodes
+        that publish should not need to check for the manager's presence;
+        the call simply fans out to zero subscribers when nobody is
+        listening.
+        """
+        if self.subscriptions is None:
+            return 0
+        return self.subscriptions.publish(
+            strip_name, event, phase=phase, time_range=time_range
+        )
 
 
 __all__ = ["ChunkedContext"]

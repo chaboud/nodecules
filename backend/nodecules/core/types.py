@@ -30,6 +30,27 @@ class DataType(str, Enum):
     ANY = "any"
 
 
+class DerivationPhase(str, Enum):
+    """Phase tag on derivation events (PR-n6+).
+
+    `WARMUP`: emitted while a filter is within settling time from a state
+    change (cold start, processor swap, op-graph swap). Mathematically
+    correct outputs but may not reflect steady-state response yet.
+    Consumers willing to take best-effort early output (live display,
+    progress UIs) opt in; default subscribers exclude these.
+
+    `CANONICAL`: emitted after settling. The trusted output. Default
+    visibility includes this phase.
+
+    `SUPERSEDED`: previously-canonical output that's been replaced by a
+    later cook (annotation re-anneal, op-graph swap). Kept for readers
+    holding earlier roots; new subscribers don't see by default.
+    """
+    WARMUP = "warmup"
+    CANONICAL = "canonical"
+    SUPERSEDED = "superseded"
+
+
 # Temporal-scheduling literals (see TEMPORALITY.md). Declared as Literals
 # rather than Enums so dataclass defaults stay trivially JSON-serializable.
 TemporalKind = Literal["static", "windowed", "streaming", "reanneal"]
@@ -104,6 +125,10 @@ class NodeSpec:
     `writes_strips`) are additive (PR-n4). Defaults are conservative —
     `is_deterministic=True` matches pre-PR-n4 behavior (every output cached);
     empty strip lists make strip declarations opt-in.
+
+    Environment-binding fields (`reads_env`, `writes_env`) are additive
+    (PR-n8). Defaults are empty lists — a node that doesn't declare
+    capability dependencies skips graph-load env validation.
     """
     node_type: str
     display_name: str
@@ -134,6 +159,16 @@ class NodeSpec:
     # the future graph-load cycle validator will not protect it.
     reads_strips: List[str] = field(default_factory=list)
     writes_strips: List[str] = field(default_factory=list)
+    # --- Environment / capability binding (PR-n8). See TEMPORALITY-ROADMAP.md. ---
+    # Declarative capability dependencies, structurally typed (string names).
+    # Conventional names: "sidecar" (filesystem root), "time" (clock), "llm.default"
+    # (default provider), "annotation_index", "strips". The graph-load validator
+    # checks that the bound Environment satisfies every declared capability.
+    reads_env: List[str] = field(default_factory=list)
+    # Append-only sinks the node is allowed to write. Examples: a strip name
+    # ("strips/claims/L3a@5min"), a signal channel, a log sink. Used to gate
+    # write access (a lens with read-only env can't accidentally write).
+    writes_env: List[str] = field(default_factory=list)
 
 
 @dataclass

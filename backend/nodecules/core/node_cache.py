@@ -11,12 +11,20 @@ Static-node cache keys set `window_hash` and `annotation_hash` to `None` —
 their inclusion in the digest is a canonical JSON `null`, so static-node
 keys stay stable as long as `core/types.py` hasn't drifted.
 
+**PR-n4: determinism + eviction.** Cache entries carry an `is_deterministic`
+flag (default True). LRU eviction (size or entry-count cap) targets
+deterministic entries only — nondeterministic entries (LLM outputs etc.)
+are pinned because re-running won't reproduce them. Eviction policies are
+opt-in via `FilesystemNodeCache(root, max_size_bytes=..., max_entries=...)`;
+when unset, cache grows without bound (current behavior).
+
 Two backends ship here:
 
 - `FilesystemNodeCache` — primary. One JSON file per key under a root dir.
   Atomic writes (tempfile + rename). The root dir is supplied by the
   caller — stenota uses `<sidecar>/cache/`; tests use `tmp_path`.
-- `InMemoryNodeCache` — dict-backed. Tests and short-lived subprocess caches.
+- `InMemoryNodeCache` — dict-backed (OrderedDict for LRU). Tests and
+  short-lived subprocess caches.
 
 No Redis/Postgres backend at this layer. The existing chat-context Redis
 cache in `core/content_addressable_context.py` is a different concern (chat
@@ -30,6 +38,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional, Protocol
@@ -155,25 +164,51 @@ class NodeCache(Protocol):
 
     def get(self, key: CacheKey) -> Optional[Any]: ...
 
-    def put(self, key: CacheKey, value: Any) -> None: ...
+    def put(self, key: CacheKey, value: Any, *, is_deterministic: bool = True) -> None: ...
 
     def invalidate(self, key: CacheKey) -> None: ...
 
 
 class InMemoryNodeCache:
-    """Dict-backed cache. No persistence. Tests + ephemeral executions."""
+    """Dict-backed cache. No persistence. Tests + ephemeral executions.
 
-    def __init__(self) -> None:
-        self._store: dict[str, Any] = {}
+    Internal store is an `OrderedDict` keyed by the cache-key digest;
+    `get()` moves the entry to the end (LRU bump). Eviction (when
+    `max_entries` is set) removes oldest deterministic entry first;
+    nondeterministic entries are pinned and never auto-evicted.
+    """
+
+    def __init__(self, *, max_entries: Optional[int] = None) -> None:
+        # Each entry is {"value": <stored>, "is_deterministic": bool}.
+        self._store: "OrderedDict[str, dict]" = OrderedDict()
+        self._max_entries = max_entries
 
     def has(self, key: CacheKey) -> bool:
         return key.digest() in self._store
 
     def get(self, key: CacheKey) -> Optional[Any]:
-        return self._store.get(key.digest())
+        digest = key.digest()
+        entry = self._store.get(digest)
+        if entry is None:
+            return None
+        # LRU bump on read.
+        self._store.move_to_end(digest)
+        return entry["value"]
 
-    def put(self, key: CacheKey, value: Any) -> None:
-        self._store[key.digest()] = _prepare_for_storage(value)
+    def put(
+        self,
+        key: CacheKey,
+        value: Any,
+        *,
+        is_deterministic: bool = True,
+    ) -> None:
+        digest = key.digest()
+        self._store[digest] = {
+            "value": _prepare_for_storage(value),
+            "is_deterministic": bool(is_deterministic),
+        }
+        self._store.move_to_end(digest)
+        self._evict_if_needed()
 
     def invalidate(self, key: CacheKey) -> None:
         self._store.pop(key.digest(), None)
@@ -181,21 +216,57 @@ class InMemoryNodeCache:
     def __len__(self) -> int:
         return len(self._store)
 
+    def _evict_if_needed(self) -> None:
+        if self._max_entries is None:
+            return
+        while len(self._store) > self._max_entries:
+            # Find the oldest *deterministic* entry. Nondeterministic
+            # entries are pinned — they represent recorded LLM / stochastic
+            # outputs that can't be reproduced, so we never auto-drop them.
+            evicted = False
+            for digest in list(self._store.keys()):
+                if self._store[digest]["is_deterministic"]:
+                    del self._store[digest]
+                    evicted = True
+                    break
+            if not evicted:
+                # Every entry is nondeterministic and pinned; the cache
+                # exceeds its cap but can't shrink. Caller's responsibility
+                # to invalidate explicitly.
+                break
+
 
 class FilesystemNodeCache:
     """Filesystem-backed cache. One JSON file per key under `root`.
 
     File contents:
-      `{"key": <CacheKey payload>, "value": <stored value>, "written_at_iso": "..."}`
+      `{"key": <CacheKey payload>, "value": <stored value>,
+        "is_deterministic": bool, "written_at_iso": "..."}`
 
     Storing the key next to the value makes cache directories diffable and
     audit-friendly: you can grep a sidecar for "what did node X do at
     window W?" by inspecting the files directly.
+
+    **Eviction (PR-n4).** When `max_size_bytes` or `max_entries` is set,
+    `put()` triggers an LRU sweep that removes oldest deterministic
+    entries (by file mtime) until the cap is satisfied. Nondeterministic
+    entries are pinned — a recorded LLM output is irreplaceable, so we
+    don't auto-drop it under cache pressure. If every entry is
+    nondeterministic and the cache still exceeds its cap, eviction
+    bottoms out and the cap is exceeded; this is the safe failure mode.
     """
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        *,
+        max_size_bytes: Optional[int] = None,
+        max_entries: Optional[int] = None,
+    ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._max_size_bytes = max_size_bytes
+        self._max_entries = max_entries
 
     def _path_for(self, key: CacheKey) -> Path:
         return self._root / f"{key.digest()}.json"
@@ -219,7 +290,13 @@ class FilesystemNodeCache:
             return None
         return blob.get("value")
 
-    def put(self, key: CacheKey, value: Any) -> None:
+    def put(
+        self,
+        key: CacheKey,
+        value: Any,
+        *,
+        is_deterministic: bool = True,
+    ) -> None:
         p = self._path_for(key)
         _atomic_write_text(
             p,
@@ -227,16 +304,71 @@ class FilesystemNodeCache:
                 {
                     "key": _cache_key_payload(key),
                     "value": _prepare_for_storage(value),
+                    "is_deterministic": bool(is_deterministic),
                     "written_at_iso": _now_iso(),
                 }
             ),
         )
+        if self._max_size_bytes is not None or self._max_entries is not None:
+            self._evict_if_needed()
 
     def invalidate(self, key: CacheKey) -> None:
         try:
             self._path_for(key).unlink()
         except FileNotFoundError:
             pass
+
+    # --- Eviction internals --------------------------------------------
+
+    def _evict_if_needed(self) -> None:
+        """Sweep oldest-first; remove deterministic entries while cap exceeded.
+
+        Determinism is read from each entry's `is_deterministic` field.
+        Missing field (legacy entries from pre-PR-n4 caches) defaults to
+        True — evictable. Unparseable entries are also treated as
+        evictable; they're corrupted anyway.
+        """
+        entries = self._scan_entries()
+        if not entries:
+            return
+        # entries is oldest-first (lowest mtime first)
+        if self._max_entries is not None:
+            while len(entries) > self._max_entries:
+                idx = _index_of_evictable(entries)
+                if idx is None:
+                    break  # every remaining entry is pinned
+                entries.pop(idx)[0].unlink(missing_ok=True)
+        if self._max_size_bytes is not None:
+            total = sum(st.st_size for _, st, _ in entries)
+            while total > self._max_size_bytes:
+                idx = _index_of_evictable(entries)
+                if idx is None:
+                    break
+                path, st, _ = entries.pop(idx)
+                path.unlink(missing_ok=True)
+                total -= st.st_size
+
+    def _scan_entries(self) -> list[tuple[Path, os.stat_result, bool]]:
+        """Return all cache entries as `(path, stat, is_deterministic)`,
+        sorted oldest-first by mtime."""
+        rows: list[tuple[Path, os.stat_result, bool]] = []
+        for p in self._root.glob("*.json"):
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except FileNotFoundError:
+                continue
+            try:
+                blob = json.loads(p.read_text(encoding="utf-8"))
+                is_det = bool(blob.get("is_deterministic", True))
+            except Exception:
+                # Corrupted entry; treat as evictable so the eviction
+                # path can clean it up.
+                is_det = True
+            rows.append((p, st, is_det))
+        rows.sort(key=lambda row: row[1].st_mtime)
+        return rows
 
 
 # --- Internal helpers ----------------------------------------------------
@@ -268,6 +400,20 @@ def _prepare_for_storage(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _prepare_for_storage(v) for k, v in value.items()}
     return value
+
+
+def _index_of_evictable(
+    entries: list[tuple[Path, os.stat_result, bool]],
+) -> Optional[int]:
+    """Return the index of the oldest evictable (is_deterministic=True) entry.
+
+    Returns None if every remaining entry is pinned (nondeterministic).
+    Used by the eviction loop so we don't drop irreplaceable LLM outputs.
+    """
+    for i, (_, _, is_det) in enumerate(entries):
+        if is_det:
+            return i
+    return None
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

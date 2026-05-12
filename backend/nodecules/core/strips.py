@@ -88,7 +88,7 @@ class StripSpec:
 
     name: str
     relative_path: str
-    schema_cls: type
+    schema_cls: type[StripSchema]
     filter_fn: Optional[Callable[[Any], bool]] = None
     index_kind: IndexKind = "time_range"
     description: str = ""

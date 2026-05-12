@@ -180,7 +180,7 @@ class InMemoryNodeCache:
 
     def __init__(self, *, max_entries: Optional[int] = None) -> None:
         # Each entry is {"value": <stored>, "is_deterministic": bool}.
-        self._store: "OrderedDict[str, dict]" = OrderedDict()
+        self._store: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
         self._max_entries = max_entries
 
     def has(self, key: CacheKey) -> bool:

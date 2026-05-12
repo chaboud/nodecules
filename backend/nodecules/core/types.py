@@ -117,18 +117,13 @@ class ResourceRequirement:
 class NodeSpec:
     """Node type specification.
 
-    Temporality-related fields (`temporal_kind`, `window_spec`, `emit_policy`,
-    `supports_reanneal`) are additive: they default to values that reproduce
-    the pre-temporality behavior. Existing nodes do not need to be modified.
+    All non-original fields default to values that reproduce pre-temporality
+    behavior. Existing nodes do not need to be modified.
 
-    Determinism + strip-binding fields (`is_deterministic`, `reads_strips`,
-    `writes_strips`) are additive (PR-n4). Defaults are conservative —
-    `is_deterministic=True` matches pre-PR-n4 behavior (every output cached);
-    empty strip lists make strip declarations opt-in.
-
-    Environment-binding fields (`reads_env`, `writes_env`) are additive
-    (PR-n8). Defaults are empty lists — a node that doesn't declare
-    capability dependencies skips graph-load env validation.
+    PR-n4 added: is_deterministic, reads_strips, writes_strips.
+    PR-n6 added: (DerivationPhase enum, no NodeSpec change).
+    PR-n7 added: settling_windows.
+    PR-n8 added: reads_env, writes_env.
     """
     node_type: str
     display_name: str
@@ -143,32 +138,19 @@ class NodeSpec:
     window_spec: Optional[WindowSpec] = None
     emit_policy: EmitPolicy = "on_window_close"
     supports_reanneal: bool = False
-    # --- Determinism + strip binding (PR-n4). See TEMPORALITY-ROADMAP.md. ---
-    # `is_deterministic`: declares whether re-running this node with the same
-    # inputs + params + window produces the same output. True is the safe
-    # default (deterministic transforms / clustering / hashing). LLM-bound
-    # nodes, providers with stochastic generation, or anything reading
-    # wall-clock state must set this False. The cache layer uses this flag
-    # to decide eviction eligibility: deterministic entries are evictable
-    # under LRU pressure; nondeterministic entries are pinned (eviction is
-    # explicit only).
+    # --- Determinism + strip binding (PR-n4). ---
     is_deterministic: bool = True
-    # Declarative strip dependencies. Names are hierarchical strings like
-    # `strips/turns/diarized`. Empty lists mean "this node does not declare
-    # strip dependencies" — it can still read sidecar files directly, but
-    # the future graph-load cycle validator will not protect it.
     reads_strips: List[str] = field(default_factory=list)
     writes_strips: List[str] = field(default_factory=list)
-    # --- Environment / capability binding (PR-n8). See TEMPORALITY-ROADMAP.md. ---
-    # Declarative capability dependencies, structurally typed (string names).
-    # Conventional names: "sidecar" (filesystem root), "time" (clock), "llm.default"
-    # (default provider), "annotation_index", "strips". The graph-load validator
-    # checks that the bound Environment satisfies every declared capability.
+    # --- Environment / capability binding (PR-n8). ---
     reads_env: List[str] = field(default_factory=list)
-    # Append-only sinks the node is allowed to write. Examples: a strip name
-    # ("strips/claims/L3a@5min"), a signal channel, a log sink. Used to gate
-    # write access (a lens with read-only env can't accidentally write).
     writes_env: List[str] = field(default_factory=list)
+    # --- IIR / pre-roll (PR-n7). ---
+    # Number of windows of upstream evidence this node consumes before its
+    # outputs are trustworthy. Default 0 = no settling time, output
+    # canonical from window 0. The scheduler-v2 cooker uses this to compute
+    # pre-roll depth (see TEMPORALITY-ROADMAP.md § PR-n7).
+    settling_windows: int = 0
 
 
 @dataclass
@@ -233,10 +215,8 @@ class ExecutionContext:
 
     def get_input_value(self, node_id: str, port_name: str) -> Any:
         """Get input value for a node port from connected outputs."""
-        # Find the edge that connects to this input
         for edge in self.graph.edges:
             if edge.target_node == node_id and edge.target_port == port_name:
-                # Get the output from the source node
                 source_outputs = self.node_outputs.get(edge.source_node, {})
                 return source_outputs.get(edge.source_port)
         return None

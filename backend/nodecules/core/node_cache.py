@@ -208,7 +208,7 @@ class InMemoryNodeCache:
             "is_deterministic": bool(is_deterministic),
         }
         self._store.move_to_end(digest)
-        self._evict_if_needed()
+        self._evict_if_needed(pinned_digest=digest)
 
     def invalidate(self, key: CacheKey) -> None:
         self._store.pop(key.digest(), None)
@@ -216,23 +216,28 @@ class InMemoryNodeCache:
     def __len__(self) -> int:
         return len(self._store)
 
-    def _evict_if_needed(self) -> None:
+    def _evict_if_needed(self, *, pinned_digest: Optional[str] = None) -> None:
         if self._max_entries is None:
             return
         while len(self._store) > self._max_entries:
             # Find the oldest *deterministic* entry. Nondeterministic
             # entries are pinned — they represent recorded LLM / stochastic
             # outputs that can't be reproduced, so we never auto-drop them.
+            # `pinned_digest` (the just-inserted entry) is also skipped so
+            # a put never silently throws away the value it was just asked
+            # to store.
             evicted = False
             for digest in list(self._store.keys()):
+                if digest == pinned_digest:
+                    continue
                 if self._store[digest]["is_deterministic"]:
                     del self._store[digest]
                     evicted = True
                     break
             if not evicted:
-                # Every entry is nondeterministic and pinned; the cache
-                # exceeds its cap but can't shrink. Caller's responsibility
-                # to invalidate explicitly.
+                # Every other entry is nondeterministic and pinned; the
+                # cache exceeds its cap but can't shrink. Caller's
+                # responsibility to invalidate explicitly.
                 break
 
 
@@ -310,7 +315,7 @@ class FilesystemNodeCache:
             ),
         )
         if self._max_size_bytes is not None or self._max_entries is not None:
-            self._evict_if_needed()
+            self._evict_if_needed(pinned_path=p)
 
     def invalidate(self, key: CacheKey) -> None:
         try:
@@ -320,13 +325,16 @@ class FilesystemNodeCache:
 
     # --- Eviction internals --------------------------------------------
 
-    def _evict_if_needed(self) -> None:
+    def _evict_if_needed(self, *, pinned_path: Optional[Path] = None) -> None:
         """Sweep oldest-first; remove deterministic entries while cap exceeded.
 
         Determinism is read from each entry's `is_deterministic` field.
         Missing field (legacy entries from pre-PR-n4 caches) defaults to
         True — evictable. Unparseable entries are also treated as
         evictable; they're corrupted anyway.
+
+        `pinned_path` (the just-written entry) is skipped during eviction
+        so a put never silently throws away the file it just wrote.
         """
         entries = self._scan_entries()
         if not entries:
@@ -334,14 +342,14 @@ class FilesystemNodeCache:
         # entries is oldest-first (lowest mtime first)
         if self._max_entries is not None:
             while len(entries) > self._max_entries:
-                idx = _index_of_evictable(entries)
+                idx = _index_of_evictable(entries, pinned_path=pinned_path)
                 if idx is None:
                     break  # every remaining entry is pinned
                 entries.pop(idx)[0].unlink(missing_ok=True)
         if self._max_size_bytes is not None:
             total = sum(st.st_size for _, st, _ in entries)
             while total > self._max_size_bytes:
-                idx = _index_of_evictable(entries)
+                idx = _index_of_evictable(entries, pinned_path=pinned_path)
                 if idx is None:
                     break
                 path, st, _ = entries.pop(idx)
@@ -404,13 +412,18 @@ def _prepare_for_storage(value: Any) -> Any:
 
 def _index_of_evictable(
     entries: list[tuple[Path, os.stat_result, bool]],
+    *,
+    pinned_path: Optional[Path] = None,
 ) -> Optional[int]:
     """Return the index of the oldest evictable (is_deterministic=True) entry.
 
-    Returns None if every remaining entry is pinned (nondeterministic).
-    Used by the eviction loop so we don't drop irreplaceable LLM outputs.
+    Returns None if every remaining entry is pinned (nondeterministic or
+    matches `pinned_path`). `pinned_path` is the just-written file from
+    the active `put()` call — never evict it inside the same call.
     """
-    for i, (_, _, is_det) in enumerate(entries):
+    for i, (path, _, is_det) in enumerate(entries):
+        if pinned_path is not None and path == pinned_path:
+            continue
         if is_det:
             return i
     return None

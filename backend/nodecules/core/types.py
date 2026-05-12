@@ -99,6 +99,11 @@ class NodeSpec:
     Temporality-related fields (`temporal_kind`, `window_spec`, `emit_policy`,
     `supports_reanneal`) are additive: they default to values that reproduce
     the pre-temporality behavior. Existing nodes do not need to be modified.
+
+    Determinism + strip-binding fields (`is_deterministic`, `reads_strips`,
+    `writes_strips`) are additive (PR-n4). Defaults are conservative —
+    `is_deterministic=True` matches pre-PR-n4 behavior (every output cached);
+    empty strip lists make strip declarations opt-in.
     """
     node_type: str
     display_name: str
@@ -113,6 +118,22 @@ class NodeSpec:
     window_spec: Optional[WindowSpec] = None
     emit_policy: EmitPolicy = "on_window_close"
     supports_reanneal: bool = False
+    # --- Determinism + strip binding (PR-n4). See TEMPORALITY-ROADMAP.md. ---
+    # `is_deterministic`: declares whether re-running this node with the same
+    # inputs + params + window produces the same output. True is the safe
+    # default (deterministic transforms / clustering / hashing). LLM-bound
+    # nodes, providers with stochastic generation, or anything reading
+    # wall-clock state must set this False. The cache layer uses this flag
+    # to decide eviction eligibility: deterministic entries are evictable
+    # under LRU pressure; nondeterministic entries are pinned (eviction is
+    # explicit only).
+    is_deterministic: bool = True
+    # Declarative strip dependencies. Names are hierarchical strings like
+    # `strips/turns/diarized`. Empty lists mean "this node does not declare
+    # strip dependencies" — it can still read sidecar files directly, but
+    # the future graph-load cycle validator will not protect it.
+    reads_strips: List[str] = field(default_factory=list)
+    writes_strips: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -124,7 +145,7 @@ class NodeData:
     parameters: Dict[str, Any] = field(default_factory=dict)
     label: Optional[str] = None
     description: Optional[str] = None
-    
+
     def __post_init__(self):
         if not self.node_id:
             self.node_id = str(uuid4())
@@ -138,7 +159,7 @@ class EdgeData:
     source_port: str
     target_node: str
     target_port: str
-    
+
     def __post_init__(self):
         if not self.edge_id:
             self.edge_id = f"{self.source_node}_{self.source_port}-{self.target_node}_{self.target_port}"
@@ -153,7 +174,7 @@ class GraphData:
     edges: List[EdgeData] = field(default_factory=list)
     meta_data: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.utcnow)
-    
+
     def __post_init__(self):
         if not self.graph_id:
             self.graph_id = str(uuid4())
@@ -170,11 +191,11 @@ class ExecutionContext:
     errors: Dict[str, str] = field(default_factory=dict)
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
-    
+
     def __post_init__(self):
         if not self.execution_id:
             self.execution_id = str(uuid4())
-            
+
     def get_input_value(self, node_id: str, port_name: str) -> Any:
         """Get input value for a node port from connected outputs."""
         # Find the edge that connects to this input
@@ -184,13 +205,13 @@ class ExecutionContext:
                 source_outputs = self.node_outputs.get(edge.source_node, {})
                 return source_outputs.get(edge.source_port)
         return None
-        
+
     def set_node_output(self, node_id: str, port_name: str, value: Any) -> None:
         """Set output value for a node port."""
         if node_id not in self.node_outputs:
             self.node_outputs[node_id] = {}
         self.node_outputs[node_id][port_name] = value
-        
+
     def set_node_status(self, node_id: str, status: NodeStatus) -> None:
         """Set node execution status."""
         self.node_status[node_id] = status
@@ -198,22 +219,22 @@ class ExecutionContext:
 
 class BaseNode(ABC):
     """Abstract base class for all node types."""
-    
+
     def __init__(self, spec: NodeSpec):
         self.spec = spec
-        
+
     @abstractmethod
     async def execute(self, context: ExecutionContext, node_data: NodeData) -> Dict[str, Any]:
         """Execute the node logic and return outputs."""
         pass
-        
+
     def validate_inputs(self, inputs: Dict[str, Any]) -> bool:
         """Validate input data before execution."""
         for port in self.spec.inputs:
             if port.required and port.name not in inputs:
                 return False
         return True
-        
+
     def get_resource_requirements(self, parameters: Dict[str, Any]) -> ResourceRequirement:
         """Get resource requirements for execution."""
         return self.spec.resource_requirements

@@ -2,8 +2,8 @@
 
 Extends `ExecutionContext` with the fields a windowed node needs to behave
 deterministically: the current `TimeRange` being processed, the
-`TimeSource` driving the scheduler, and lookup methods that respect the
-window boundary.
+`TimeSource` driving the scheduler, the optional annotation index, and
+(PR-n4) a strip registry + sidecar path for the strip pull API.
 
 Static nodes never see one of these (they receive a plain
 `ExecutionContext`). Temporal nodes receive `ChunkedContext` and can
@@ -12,10 +12,13 @@ downcast from `ExecutionContext` via `isinstance`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, List, Optional
 
 from .annotations import AnnotationIndex, AnnotationRef
+from .strips import StripRegistry, StripView
 from .time import TimeRange, TimeSource
 from .types import ExecutionContext
 
@@ -33,6 +36,13 @@ class ChunkedContext(ExecutionContext):
     current_window: Optional[TimeRange] = None
     time_source: Optional[TimeSource] = None
     annotation_index: Optional[AnnotationIndex] = None
+    # PR-n4: strip registry + sidecar path together let `strip(name)` resolve
+    # a strip view over the current sidecar. Either field may be None when
+    # the caller doesn't need the strip API; both must be set (or sidecar
+    # discoverable via `execution_inputs["sidecar_path"]`) when `strip()`
+    # is called.
+    strips: Optional[StripRegistry] = None
+    sidecar: Optional[str] = None
 
     def get_inputs_in_window(
         self,
@@ -78,6 +88,33 @@ class ChunkedContext(ExecutionContext):
         if self.annotation_index is None:
             return None
         return self.annotation_index.annotation_hash_for_window(window)
+
+    # PR-n4: strip resolution -------------------------------------------------
+
+    def strip(self, name: str) -> StripView:
+        """Return a `StripView` for the named strip in the current sidecar.
+
+        Looks up `name` in the registry, resolves the sidecar from
+        `self.sidecar` (or falls back to `execution_inputs["sidecar_path"]`
+        for compatibility with stenota's current pattern), and constructs
+        the lazy view. Raises if no registry is bound or no sidecar is
+        available.
+        """
+        if self.strips is None:
+            raise RuntimeError(
+                "ChunkedContext.strips is not set; bind a StripRegistry "
+                "before calling strip()"
+            )
+        sc = self.sidecar
+        if sc is None:
+            sc = self.execution_inputs.get("sidecar_path")
+        if not sc:
+            raise RuntimeError(
+                "no sidecar path available; set ctx.sidecar or "
+                "execution_inputs['sidecar_path']"
+            )
+        spec = self.strips.get(name)
+        return StripView(spec, sc)
 
 
 __all__ = ["ChunkedContext"]

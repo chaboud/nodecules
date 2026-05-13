@@ -1,172 +1,168 @@
 # REFERENCE-MODEL.md — sparse-replica COW reference tree, excel-shaped processing
 
-**Status:** design proposal, no code yet. Third draft. v1 framed it as
-functional dataflow with reachability-based cache lifecycle (committed
-as `2cd3233`). v2 (uncommitted, discarded) framed it as a spreadsheet.
-Both were wrong in the same direction — over-functional or
-over-spatial. v3 distinguishes *structure* (a sparse-replica COW
-reference tree, wait-free for readers) from *processing* (excel-shaped
-DAG resolution running on top of that structure).
+**Status:** design proposal, no code yet. Fourth draft. v1 framed it
+as functional dataflow with reachability cache (committed as
+`2cd3233`). v2 (uncommitted, discarded) framed it as a spreadsheet.
+v3 settled on COW reference tree + excel DAG (committed as `cd3367f`).
+v4 incorporates several chat-driven refinements: first-class
+envelope/content split, transactions from batched root writes,
+multi-axis markers, refcount-rules-everything for retention,
+per-strip retention policies with staggered curves, external leaves
++ resurrection unifying recook/cold-start/rebuild, and the
+proxy-edit substitution pattern for live cooks.
+
+The two-layer framing (structure vs. processing) is unchanged from
+v3; everything below is additive refinement.
 
 ## 1. Premise
 
-Two layers of model, kept rigorously separate:
+Two layers, kept rigorously separate:
 
 ### Structure: the substrate
 
 The data is stored in a **sparse-replica copy-on-write reference
-tree** that's wait-free for examination:
+tree**, wait-free for examination:
 
-- **Tree** — hierarchical addressing. The address space is meeting →
-  strip → position (time-range or ordinal) → cell. Internal nodes are
-  tree nodes; leaves are cells.
-- **Sparse** — only populated positions take space. Address space is
-  unbounded in principle. A strip with one cell every 30 seconds and
-  another strip with one cell per meeting cost proportionally
-  different amounts.
-- **Copy-on-write** — every write produces a new version of the path
-  from leaf to root, with structural sharing of the unchanged
+- **Tree** — hierarchical addressing: meeting → strip → position →
+  cell. Internal nodes are tree nodes; leaves are cells.
+- **Sparse** — only populated positions take space. Address space
+  is unbounded in principle; populated cells are bounded by what's
+  cooked.
+- **Copy-on-write** — every write produces a new version of the
+  path from leaf to root, with structural sharing of unchanged
   siblings. Old roots remain valid snapshots for in-flight readers.
-- **Replica-friendly** — partial replicas can coexist. Different
-  RAM-resident working sets in different processes, future
-  distributed setups, on-disk subsets that don't shadow the full
-  tree — all expressible as roots over the same substrate.
+- **Replica-friendly** — partial replicas coexist. Different
+  RAM-resident working sets, future distributed setups, on-disk
+  subsets — all expressible as roots over the same substrate.
 - **Wait-free for examination** — a reader holds a root pointer and
-  traverses without locks. Writes never interfere with reads. Atomic
-  write = CAS on a root pointer to publish a new version.
+  traverses without locks. Writes never interfere with reads.
+  Atomic write = CAS on a root pointer.
 
-This is the same shape Clojure persistent data structures, immer.js,
-Git's object database, and ZFS snapshots all use. None of it is
-exotic; it's a deliberately conservative choice that gives us
-lineage, snapshot consistency, and lock-free reads as a package.
+Same shape as Clojure persistent data structures, immer.js, Git's
+object database, ZFS snapshots. None of this is exotic; it's a
+deliberately conservative choice that gives lineage, snapshot
+consistency, lock-free reads, and natural transactions as a package.
 
 ### Processing: excel over the substrate
 
-Cooking is **DAG resolution** over a separate **reference DAG** that
-lives orthogonal to the address tree:
+Cooking is **DAG resolution** over a separate **reference DAG**
+that lives orthogonal to the address tree:
 
-- Cells in the tree reference other cells (predecessors). The
-  reference relation forms a DAG, validated at graph load to be
-  acyclic (acceptable backward-time references; rejected forward
-  references — see §4).
-- When a predecessor cell's version bumps, the cell that depends on
-  it is *dirty*.
-- Recook = walk dirty cells in topological order, re-execute their
-  recipes, write new cell versions through the substrate.
-- This is excel: cells reference cells, formulas re-fire when inputs
-  change.
+- Cells in the tree reference predecessor cells. The reference
+  relation forms a DAG, validated acyclic at graph load.
+- When a predecessor's version bumps, dependent cells are *dirty*.
+- Recook = walk dirty cells in topological order; re-execute the
+  recipe against current state; write new cell versions through
+  the substrate.
 
-The tree gives us storage + versioning + lineage. The reference DAG
-gives us cooking. The two coexist; the tree is what `get(CellId)`
-walks; the DAG is what the scheduler walks.
+The tree gives storage + versioning + lineage + transactions. The
+reference DAG gives cooking. The two coexist; the tree is what
+`get(...)` walks; the DAG is what the scheduler walks.
 
-## 2. The cell
+## 2. The cell — envelope + content, first-class
 
-A cell is the unit of stored data. Two parts:
+Every cell has two parts, **independently addressable, independently
+refcounted, independently retainable**:
+
+- **Envelope** — cheap (~hundreds of bytes). The metadata that
+  describes the cell and lets it be rebuilt: id, version, writer,
+  recipe, exact-versioned inputs, cook time, state tag.
+- **Content** — expensive (bytes to megabytes). The actual data
+  dict the recipe produced. The output of the node's execution.
 
 ```python
-# Tree-node metadata. Lives in the tree, not in the user-visible content.
-class Cell:
+class CellId(BaseModel):
+    strip: str
+    time_range: Optional[TimeRange] = None
+    ordinal:    Optional[int] = None
+
+class Envelope(BaseModel):
     id: CellId
     version: int                          # monotonic per cell
-    writer_node_id: str                   # which node produced this
-    recipe: RecipeRef                     # template id + version, optional fork
+    writer_node_id: str
+    recipe: RecipeRef
     inputs: list[VersionedCellId]         # exact cells read, with their versions
+    leaves: list[ExternalLeafRef]         # external resources read at cook time (§7)
     cooked_at_ms: int
-    state: Literal["wet", "drying", "dry", "smudged"]
-    content: dict                         # the actual data — the node's output dict
+    cooked_from: dict[str, ResourceRef]   # which substitute was used per leaf (§7)
+    state: Literal["wet", "drying", "dry", "smudged", "failed"]
 
-class CellId:
-    strip: str                            # "strips/turns/diarized"
-    time_range: Optional[TimeRange]       # for time-indexed strips
-    ordinal:    Optional[int]             # for ordinal-indexed strips
-
-class VersionedCellId:
-    cell: CellId
-    version: int                          # snapshot of the input at cook time
+class Content(BaseModel):
+    id: CellId
+    version: int
+    data: dict                            # the node's output dict
 ```
 
-The content **is** the output dict of the node that produced it. Not
-a wrapper, not a payload field — the dict directly. Downstream
-consumers address into it the same way nodecules edges today connect
-`(source_node, output_key) → (target_node, input_key)`: a path into
-the dict (`cell.foo.bar[3].baz`) is the natural read.
+Same `cell_id` addresses both. Two access paths at the cell-store
+API:
 
-The metadata (everything except `content`) is carried in the tree
-node, not the dict. The dict stays clean — it's just the data,
-serializable, no implicit fields. Consumers querying `get(CellId)`
-can choose to receive the bare content or the full `Cell` envelope.
+```python
+cell_store.get_envelope(cell_id) -> Optional[Envelope]
+cell_store.get_content(cell_id) -> Optional[Content] | Absent | Lost
+```
 
-The `state` tag expresses pending-ness in-tree, not in a separate
-scheduler-state structure. Everything observable about a cell's
-lifecycle is on the cell. (`wet` = currently cooking, `drying` =
-cooked but downstream not yet refreshed, `dry` = fully settled,
-`smudged` = manually marked dirty.)
+Reasons for the split:
+
+- **Independent refcounts.** A retention policy can drop content
+  while keeping envelopes (the resurrection contract — §8). User
+  / annotation / in-flight reader refs on either side keep that
+  side alive regardless of policy.
+- **Cheap tombstones.** A pruned cell with envelope still present
+  is honest about history without paying the content cost.
+- **Lineage queries don't pull content.** Walking impact ("what
+  depends on cell X") only needs envelopes. Content fetches are
+  on demand.
+
+The `state` tag is **on the envelope**, not in a separate scheduler
+structure. The lifecycle (`wet` / `drying` / `dry` / `smudged` /
+`failed`) is observable in-tree; there's no other state machine.
+(`failed` is new in v4 — explicit "this cell's last cook errored;
+see event log for details." Sits cleanly alongside the four UI tags
+in `MEMORY.md`.)
 
 ## 3. The node is the writer
 
-There is no separate "writer registry" or "claim on a strip." A node
-in the graph is a (template instance + input mapping) pair, and its
-execution produces one output dict per invocation. That dict becomes
-the content of one cell at one position.
+No separate "writer registry" or strip claim. A node = (template
+instance + input mapping). Execution produces one output dict per
+invocation; that dict becomes one cell's content. Single-writer-
+per-cell falls out of node shape; no registry-level enforcement
+needed.
 
-So:
-
-- Each node has exactly one output → exactly one cell per cooking.
-- Single-writer-per-cell falls out of the node shape. No registry
-  rejection, no "two templates claiming the same strip" failure mode.
-- If two nodes need to fill different views of the same backing
-  storage (e.g., L2-turns vs. all-L2-claims into `claims/L2.jsonl`),
-  they're two strips with the same backing file and different filters
-  — exactly the existing `StripSpec` pattern. Each is a single-writer
-  strip.
-
-Practical consequence: the recipe library never needs to enforce
-"unique writer." The graph wiring tells you who writes what.
+If two views of the same backing storage exist (e.g., L2-turns and
+all-L2-claims into `claims/L2.jsonl`), they're two strips with the
+same backing file and different filters — exactly the existing
+`StripSpec` pattern. Each is a single-writer strip.
 
 ## 4. Reference DAG and typed access
 
 Cells reference predecessor cells via the **typed access patterns**
-from v1 §3 (unchanged). A recipe template declares its abstract
-access at the library level:
+from v1 §3 (unchanged):
 
 ```python
-class StripAccess(BaseModel):
-    strip_name: str
-    pattern: AccessPattern    # ADT: Latest / Range / Before / After /
-                              # OrdinalAt / OrdinalRange / SelfRelativeOrdinal
+class AccessPattern:
+    Latest
+    Range(start: TimeExpr, end: TimeExpr)
+    Before(at: TimeExpr) / After(at: TimeExpr)
+    OrdinalAt(index: IndexExpr) / OrdinalRange(start, end: IndexExpr)
+    SelfRelativeOrdinal(offset: PositiveInt)
 
-class RecipeTemplate(BaseModel):
-    library_id: str
-    version: str
-    reads:   list[StripAccess]
-    writes:  list[str]        # strips this template fills
-    op_graph: GraphData
-
-# Time-class and ordinal-class expressions
 class TimeExpr:
-    SelfWindowStart
-    SelfWindowEnd
-    SelfWindowStart - Duration
-    SelfWindowEnd - Duration
+    SelfWindowStart / SelfWindowEnd
+    SelfWindowStart - Duration / SelfWindowEnd - Duration
     AbsoluteMs(int)
-    # SelfWindowEnd + Duration intentionally absent; forward-time
-    # reads are rejected at construction.
+    # SelfWindowEnd + Duration intentionally absent (forward-time rejected)
 
 class IndexExpr:
     SelfElementIndex
-    SelfElementIndex - PositiveInt    # n-1, n-2, ...; legal
+    SelfElementIndex - PositiveInt
     AbsoluteIndex(int)
-    # SelfElementIndex + anything intentionally absent.
+    # SelfElementIndex + anything intentionally absent (forward-self rejected)
 ```
 
-When a node cooks at a specific position, the abstract pattern is
-*resolved* against `self.position` → a concrete list of input
-`(CellId, version)` pairs. Those pairs are written into the cell's
-`inputs` field — the *exact* dependency record, not the abstract
-pattern.
-
-This separates two concerns:
+A recipe template declares its abstract `reads`. When a node cooks
+at a specific position, the abstract pattern is *resolved* against
+`self.position` → a concrete list of input `(CellId, version)`
+pairs, written into `envelope.inputs`. Two concerns separate:
 
 - *What the recipe says it reads* (abstract; library-level; static
   cycle analysis runs on this).
@@ -174,435 +170,572 @@ This separates two concerns:
   refs; lineage queries run on this).
 
 A node without declared patterns falls back to the existing runtime
-strip API and is unanalyzable by static cycle detection. Migration is
+strip API, unanalyzable by static cycle detection. Migration is
 incremental.
 
-### Static acyclicity (extended)
+### Static acyclicity
 
-The existing `cycle_validator.py` (PR-n7) rejects coarse "same-strip
-read+write" cycles. With typed patterns, it can do finer rejection:
-build a `(node, time_class)` graph where `time_class ∈ {past, present,
-future}` relative to `self`. Cycles in the `present`-only subgraph
-are rejected. Cross-window feedback (`Before(SelfWindowStart)`,
+The existing `cycle_validator.py` rejects coarse same-strip cycles.
+With typed patterns it does finer rejection: build a `(node,
+time_class)` graph where `time_class ∈ {past, present, future}`
+relative to `self`. Cycles in the `present`-only subgraph are
+rejected. Cross-window feedback (`Before(SelfWindowStart)`,
 `SelfRelativeOrdinal(n>0)`) resolves to `past` and is always legal.
-The "before is fine" escape hatch becomes structural, not idiomatic.
 
 ## 5. Recipe library + forking
 
-Recipe templates are versioned and live in a library:
+Templates are versioned and library-resident:
 
 ```python
 class RecipeRef(BaseModel):
     library_id:      str        # "stenota.summarizer.L2"
-    library_version: str        # content hash or semver
-    local_fork:      Optional[str] = None  # hash of per-cell overrides; None = library default
+    library_version: str        # content hash
+    local_fork:      Optional[str] = None  # hash of per-cell overrides
 ```
 
-Cells reference templates via `RecipeRef`. Most cells point at the
-library default. A cell can fork its recipe locally for one-off
-customization (a per-meeting custom summarizer prompt, an
-annotation-attached re-cook directive).
+- Library version bumps dirty cells pointing at the previous version
+  iff `local_fork is None` (forked cells are insulated).
+- Un-forking re-checks against the current library version.
+- `library_version` is the content hash of the template; "editing"
+  produces a new version, never mutates.
 
-Forking interactions:
+## 6. External leaves and source-data references
 
-- Library version bumps dirty cells pointing at the previous library
-  version *iff* `local_fork is None`. Forked cells are insulated.
-- Un-forking re-checks against the current library version (might
-  dirty the cell).
-- A cell with `local_fork = X` and library version `V` is identified
-  by `(library_id, V, X)` — different from `(library_id, V', X)` even
-  if the fork hash is the same.
+The data graph terminates at **external leaves** — references to
+durable storage outside the cell store. Media files, sensor streams,
+recorded HTTP responses, anything the cell store doesn't manage.
 
-The library itself is content-addressable: `library_version` is the
-content hash of the template's op-graph + declared inputs/outputs.
-"Editing a template" doesn't mutate it; it creates a new version.
+```python
+class ResourceRef(BaseModel):
+    scheme:  str                # "media", "live", "sensor", "http"
+    locator: str                # "meeting_abc.mp4", "mic:0", "https://..."
+    slice:   Optional[SliceSpec] = None   # byte range, time range, etc.
 
-## 6. Dirty propagation
+class ExternalLeafRef(BaseModel):
+    primary:     ResourceRef
+    substitutes: list[ResourceRef] = []   # ordered fallbacks
+```
+
+A cell's envelope carries `leaves: list[ExternalLeafRef]` for the
+external resources its cook touched. The cell-store doesn't hold
+the bytes; a `ResourceHandler` plugin keyed by scheme knows how to
+fetch them when needed.
+
+### Proxy-edit substitution: the live-cook pattern
+
+Live mode reads from `live://mic:0#0..30s` while simultaneously
+recording to `media://meeting.mp4#audio[0..30s]`. At cook time the
+live ref resolves; the recording isn't necessarily complete yet.
+After the meeting ends, the live ref is gone; the recording is the
+durable source.
+
+The pattern:
+
+- Recipe declares: `leaves = [ExternalLeafRef(primary=live://...,
+  substitutes=[media://...])]`
+- At cook time: try `primary`; if it resolves, use it; record
+  `cooked_from[leaf_id] = primary`.
+- If primary fails, walk substitutes in order; record whichever
+  worked.
+- At rebuild time: same dance. If `cooked_from` was `primary` and
+  primary no longer resolves, the substitute is now the source.
+  Rebuild outcome annotated (see §8).
+
+Direct analogue: video proxy editing. Cut against the proxy in
+realtime, conform against the master at finalization. The cell
+store knows it's working with a proxy; the substitution is honest
+and traceable.
+
+## 7. Resurrection unifies recook, cold-start, and rebuild
+
+Three operations collapse into one: **given an envelope, produce
+content.**
+
+- **Dirty recook** — content exists but is stale. Discard, rebuild.
+- **GC'd resurrection** — content was pruned by retention policy.
+  Rebuild from envelope's recipe + inputs + leaves.
+- **Cold start** — cell never cooked (envelope exists, content
+  never produced). Rebuild = first cook.
+
+All three: walk `envelope.inputs` (recursively resurrect as needed),
+resolve `envelope.leaves` (resolve `primary` or fall back to a
+`substitute`), execute the recipe, write new content. Same
+machinery; only the trigger differs (dirty signal, GC sweep,
+scheduler tick).
+
+### Four resurrection outcomes
+
+A `get_content(cell_id)` call that triggers rebuild has four
+possible outcomes:
+
+1. **Recoverable / exact** — every transitive dependency resolves,
+   recipe is deterministic, no substitutes used. Rebuilt content is
+   byte-identical to original.
+2. **Recoverable via substitute** — a substitute was used in place
+   of an unresolvable primary leaf somewhere in the chain. For
+   pure-audio strips this is usually fine (the recording is
+   byte-identical to what came in live); for VLM frame-grabs it
+   might differ (keyframe alignment). UI flags it.
+3. **Equivalent-but-not-identical** — recipe is nondeterministic
+   (unfixed-seed LLM, randomness) OR recipe library version moved
+   on. Rebuilt content is *a* valid value; not the original. UI
+   surfaces it as "rebuilt with new parameters; pin if you wanted
+   the prior value."
+4. **Lost forever** — some envelope in the chain is gone OR an
+   external leaf is unresolvable (primary AND all substitutes fail).
+   Returns a `Lost` sentinel with the reason.
+
+A `Lost` cell's envelope can still be queried. The envelope is the
+tombstone: it says "I remember a cell was here; this is what it
+was for; here's why rebuilding failed." UI affordances: delete the
+envelope (and cascade to dependents), annotate as historical-only,
+or attempt rebuild after the user provides a new substitute (e.g.,
+pointing the system at a re-located media file).
+
+## 8. Dirty propagation
 
 A cell is dirty iff any of:
 
-1. **Predecessor changed.** Any `(input_cell, version)` in this cell's
-   `inputs` has been superseded — the current version of `input_cell`
-   in the tree is higher than the version this cell recorded at cook
-   time.
+1. **Predecessor changed.** Some `(input_cell, version)` in
+   `envelope.inputs` has been superseded.
 2. **Recipe changed.** `recipe.library_version` differs from the
-   library's current version for that `library_id`, AND
-   `recipe.local_fork is None`.
-3. **Manual mark.** `state == "smudged"` (annotation invalidation,
-   tortoise recook, explicit user action).
+   library's current version AND `recipe.local_fork is None`.
+3. **Manual mark.** `state == "smudged"`.
 
-Recook walks dirty cells in topological order (over the reference
-DAG, using each cell's resolved `inputs`), re-executes the recipe
-against the current tree state, writes a new cell version through the
-substrate. The new cell:
+Recook walks dirty cells in topological order, treating each recook
+as a resurrection (§7). The same operation handles cold start
+(envelope exists, no content), GC'd content (envelope exists,
+content was pruned), and stale content (envelope + content, both
+present, but inputs moved on).
 
-- `version` bumps
-- `inputs` records the cells read this time (might differ from prior
-  cook if the abstract pattern resolves to different positions now)
-- `state` transitions: `wet` while cooking, `drying` after own cook
-  but before downstream settles, `dry` when downstream-stable
+**Pinning.** A cell's envelope can carry a `pinned: bool` flag. A
+pinned cell ignores predecessor-changed and recipe-changed dirty
+signals; only manual smudge / un-pin triggers recook. Pinning is the
+*only* mechanism for "preserve this output across recooks." LLM
+outputs the user reviewed and approved? Pin them. Untouched LLM
+outputs? They recook with new seeds — a new valid value, fine.
 
-**Pinned cells.** A cell flagged as pinned ignores predecessor-changed
-and recipe-changed dirty signals; only manual smudge / un-pin
-triggers recook. Pinning is a per-cell user affordance (the value is
-"good as-is, don't touch"). No global pinning policy; no
-`is_deterministic` flag at the cache layer. Pinning is the *only*
-mechanism for "preserve this output across recooks." LLM outputs the
-user reviewed and approved? Pin them. Untouched LLM outputs? They
-recook with new seeds; new value, also valid. That's fine.
+**`is_deterministic` is a predicate, not a flag.** Derived from the
+recipe template's declared inputs (all-declared + no external-effect
+tags = deterministic). Used by the scheduler to skip recooking
+deterministic cells whose `inputs` haven't bumped (no new value to
+produce). Not stored on cells; not used by storage.
 
-**`is_deterministic` as a predicate.** Derived from the recipe
-template's declared inputs (all-declared = deterministic in the
-"would-produce-same-value-from-same-inputs" sense). Used by the
-scheduler to skip recooking deterministic cells whose `inputs` haven't
-bumped — there's no new value to produce. Not stored on cells; not
-used by storage.
+## 9. Diagnostics live outside the tree
 
-## 7. Diagnostics live outside the tree
+Errors, logs, traces, perf metrics live in the event log
+(`events.jsonl`), not in the tree. The tree is *data*; diagnostics
+are *about the process that produced data*. Different audience,
+different lifecycle (often longer-lived than the data they
+describe; sometimes scrubbed for privacy).
 
-Errors, logs, traces, perf metrics are observable from outside but
-**not** part of the tree. The existing `events.jsonl` event-log is
-the right home. Two reasons:
+A failed cook produces an event-log entry plus a `failed` envelope
+state tag. The error details live in the event log, not on the cell.
+Subscription consumers (`MEMORY.md` → `signals_and_slots.md`) tail
+the event log; they're independent of cell-store operations.
 
-- The tree is *data*. Diagnostics are *about the process that
-  produced data*. They have a different audience (developer / user
-  trying to debug) and a different lifecycle (often kept longer than
-  the data they describe; sometimes scrubbed for privacy).
-- Mixing them into the tree muddies the snapshot semantics. A reader
-  asking "what is the cell at strips/asr[42]" wants the ASR
-  segments; not an error attached to a prior failed cook of an
-  upstream cell.
+## 10. Retention: refcount is the mechanism
 
-If a cell's recook fails, that's an event in the log + a `state` tag
-on the cell (probably a new tag — `failed`? `errored`? — TBD; the
-existing four tags don't quite cover this). The error details live in
-the event log, not on the cell.
+**Refcount rules everything.** Retention "policy" is just *when the
+system releases its own refs*. User refs, annotation refs, in-flight
+reader handles, root pointers — any of them keep a cell alive
+regardless of policy. The system is one ref-holder among many.
 
-## 8. Retention: RAM and disk both cost money
+Two-tier retention with envelope/content split:
 
-The tree is unbounded in principle; in practice we have a budget.
-Two retention layers:
+### RAM (hot working set)
 
-### RAM (the hot working set)
-
-The substrate supports sparse load: tree internal nodes and leaf
-cells can be absent from RAM, fetched from disk on access. The hot
-working set is the subset currently resident.
-
-- Loading is lazy: a `get(CellId)` walks the tree; missing subtrees
-  trigger a disk fetch.
-- Eviction from RAM is *lossless* — drop the in-memory copy, the
-  cell still exists on disk, next read reloads. Standard LRU works
-  fine here because the only cost is an I/O round-trip.
-- Working-set bound is configurable (e.g., `~/.stenota/config.toml`:
+- Lazy load: tree internal nodes + leaf cells absent from RAM,
+  fetched on read. Sparse traversal from root.
+- Eviction: drop in-memory copy when refcount → 0. *Lossless* — the
+  next read reloads from disk. Standard LRU on system-held refs
+  works fine.
+- Bound: configurable (e.g., `~/.stenota/config.toml`:
   `cache.ram_mb = 256`). Default reasonable for an MBA.
 
 ### Disk (durable storage)
 
-Sidecars persist cells. Sidecar storage is *not* unbounded — disk
-fills up — so a real retention policy exists:
+- The cell store is the on-disk representation; sidecars persist
+  cells. Per-cell pruning is real because disk fills up.
+- Pruning *can* be lossy (no recovery without rebuild) but
+  envelope-content split keeps the loss small: prune content
+  aggressively, keep envelope (the resurrection slate) cheap.
 
-- **Pin-protected.** Cells the user has pinned never get pruned.
-- **Recent.** Cells within the configured retention horizon stay.
-  Default: indefinite for v0.x; user-configurable cap later.
-- **Project-state.** Cells in the cross-meeting project-state layer
-  (`MEMORY.md` → `project_state_layer.md`) have their own retention
-  rules (probably indefinite; small in volume).
-- **Pruning candidates.** Cells outside all of the above are eligible
-  for pruning. Pruning collapses old versions first (keep only
-  latest), then collapses dry cells, then collapses settled-and-old
-  cells.
+### Staggered, per-strip retention
 
-Pruning is opportunistic and reversible until commit: it can be
-queued, displayed in UI ("about to free 1.2GB; OK?"), and undone
-before it lands. Not a silent background sweep.
+Different strips have wildly different cost/value:
 
-The crucial property: **storage budget is a user-facing knob**, not
-an in-substrate policy that runs on each `put()`. The substrate
-accepts new writes; pruning is a separate operation invoked when the
-budget is exceeded or the user requests it.
+| Strip                          | Content retention                          | Envelope retention   |
+|--------------------------------|--------------------------------------------|---------------------|
+| `strips/raw/audio`             | latest only; rebuild from media file       | always (cheap)      |
+| `strips/asr/segments`          | last hour + markers; daily checkpoints     | always              |
+| `strips/diar/segments`         | last hour + markers; daily checkpoints     | always              |
+| `strips/claims/L2`             | every version (small; expensive to recook) | always              |
+| `strips/claims/L4`             | every version (tiny; LLM unfixed seed)     | always              |
+| `strips/annotations/*`         | every version forever                      | always              |
+| `strips/raw/video` (future)    | latest only; rebuild from media file       | always              |
 
-## 9. Lineage
+Each strip's retention rule is "the system holds its own ref to
+content at markers M_C, and to envelopes at markers M_E, with M_E ⊇
+M_C." User refs override; pinned cells override.
 
-Lineage queries are first-class but opt-in. Default consumer API:
+### Staggered curves
 
-```python
-cell_store.get(cell_id)               # latest content
-cell_store.get_envelope(cell_id)      # full Cell with metadata
+Retention density follows a staggered curve, not a single cliff:
+
+```
+density of retained content at marker offset from now
+  ┌────────
+  │      ╲___
+  │          ╲___
+  │              ╲___
+  │                  ╲___
+  └──────────────────────────► marker offset
+  now            1h          1d        1mo
 ```
 
-Power-user / debugging API:
+Last hour: every marker preserved. Last day: every 10 minutes.
+Last month: daily. Older: weekly. Configurable per strip. Free with
+COW because structural sharing means N retained markers share most
+of their bytes.
+
+### Lost-forever is a real outcome
+
+Even with envelope retention, content can be unrecoverable: the
+media file went missing, the live stream wasn't recorded, the
+recipe library no longer has the version that cooked the cell. The
+`Lost` sentinel is honest about this. The envelope sticks around as
+a tombstone (until nothing references it), and the UI can offer to
+delete it.
+
+## 11. Markers and transactions
+
+### Markers generalize beyond time
+
+A marker is a **labeled root pointer**. Labels can be:
+
+- transaction id (every batched commit)
+- semantic event ("ASR window 12 settled", "user accepted speaker
+  name proposal")
+- user action ("undo point auto-set before destructive edit")
+- recipe-library version bump
+- wall-clock checkpoint ("save every N seconds")
+
+Multiple labelings coexist on the same root. The history is
+navigable along any axis: "show me the last 5 transactions," "show
+me what changed when annotation X was added," "go back to before
+the 4:32pm library bump."
+
+### Transactions = batched root writes
+
+The COW substrate gives ACID for free when writes are batched:
+
+- Collect N cell puts against the current root (structural sharing
+  means construction against the old root is cheap).
+- CAS the root once to publish all N atomically.
+
+Properties:
+
+- **Atomic** — root pointer moves or doesn't. Either every cell in
+  the batch is visible or none is.
+- **Consistent** — the new tree was built against a single prior
+  snapshot. No torn reads.
+- **Isolated** — readers on the old root see the old world until
+  the CAS lands; readers on the new root see the new world. Wait-
+  free for both.
+- **Durable** — persist the new root before CAS.
+
+Datomic, Clojure's `swap!`, and many functional databases work
+exactly this way. The "nearly for free" caveat: same-cell concurrent
+writes still need conflict resolution, but the MVP's single-writer-
+per-cell rule (§3) makes those structurally absent.
+
+A scheduler tick is naturally a transaction: cook everything dirty,
+batch all the new cells, CAS the root once. Failures roll back by
+discarding the in-progress root (just drop the local construction
+work; the published root never moved).
+
+## 12. Lineage
+
+First-class queryable history. Default API returns latest content
+or envelope; lineage is opt-in:
 
 ```python
-cell_store.get_at(cell_id, version=V)             # specific version
-cell_store.get_lineage(cell_id)                   # full version history
-cell_store.walk_inputs(cell_id, depth=N)          # upstream closure
-cell_store.walk_impact(cell_id, depth=N)          # downstream closure
+cell_store.get_envelope(cell_id)               # latest envelope
+cell_store.get_content(cell_id)                # latest content (may return Absent / Lost)
+cell_store.get_at(cell_id, version=V)          # specific version
+cell_store.get_at_marker(cell_id, marker=M)    # version as of marker M
+cell_store.get_lineage(cell_id)                # version history (envelope + content where retained)
+cell_store.walk_inputs(cell_id, depth=N)       # upstream closure
+cell_store.walk_impact(cell_id, depth=N)       # downstream closure
 ```
 
-The closure walks use each cell's `inputs` (upstream) and the
-reverse-index from `inputs` (downstream). The reverse-index is built
-on demand or maintained as a secondary structure; either way, the
-canonical record is the cells' `inputs` lists.
+`walk_impact` uses the inverse-index from `envelope.inputs` —
+"every cell whose `inputs` contains this cell." Built on demand or
+maintained as a secondary structure. The canonical record is the
+forward `inputs`; the inverse is derived.
 
-For debugging "what changed because I smudged this annotation?":
-`walk_impact(annotation_cell)` returns every cell whose lineage
-transitively includes the annotation. The UI affordance is
-straightforward.
+Annotation impact debugging — "what changed because I smudged this
+annotation?" — is just `walk_impact(annotation_cell)`. UI surfaces
+the result as a list of cells with their version transitions.
 
-Version retention vs. cell retention: keeping prior versions of a
-cell on disk costs space proportional to the version count. Default
-v0.x: keep only the latest cell version on disk; lineage is queryable
-within a session (in-memory history) but not durable across sessions.
-Opt-in durable history is a v0.5+ feature if the user wants
-cross-session "undo" or temporal scrubbing.
+## 13. Concurrency
 
-## 10. Concurrency
+MVP scope: single-process, single-writer-per-cell, batched
+transactions on the root.
 
-MVP single-writer-per-cell falls out of node shape (§3). What about
-parallel cooking?
+- **Disjoint strips.** Different nodes filling different strips
+  cook concurrently; writes touch disjoint leaves; CAS retries
+  resolve trivially.
+- **Same strip, different positions.** Parallel windowed cooks
+  touch different leaves in the same subtree; COW structural
+  sharing handles this; worst case is a CAS retry.
+- **Same cell, concurrent writes.** Structurally absent (single-
+  writer rule).
+- **User pin vs system recook.** Per-cell policy (pin wins),
+  not a merge.
 
-- **Disjoint strips.** Different nodes filling different strips cook
-  concurrently. Each write creates a new root version; the substrate
-  merges them via CAS retry or a coalescing root-write loop. No
-  conflict possible because the writes touch different leaves.
-- **Same strip, different positions.** A windowed cooker filling
-  `strips/turns/diarized` at windows W1 and W2 in parallel: each
-  write touches a different leaf in the same subtree. The
-  COW-with-structural-sharing handles this — they merge by
-  combining the two new paths into a common parent. Worst case is a
-  CAS retry on the root.
-- **Same cell, concurrent writes.** Not reachable in the MVP because
-  a cell is written by exactly one node, and the scheduler doesn't
-  schedule the same `(node, position)` twice in parallel.
-- **User-pin vs. system-recook.** A user pins a cell while the
-  scheduler is about to recook it. Pin wins: recook is skipped.
-  This is a per-cell policy check (read the pin flag, decide to
-  proceed or skip), not a merge problem.
-
-Future concerns (out of scope for v0.x):
+Future (out of scope for v0.x):
 
 - **Multi-instance live edit.** Two stenota processes editing the
-  same project. Real OT or CRDT territory. The COW substrate
-  accommodates this — each instance holds a root; merges combine
-  roots — but the *merge function* needs design. Likely:
-  per-strip-class merge policies (LWW for pure-data strips,
-  union for annotation strips, manual conflict resolution for
-  pinned cells).
-- **Redux-shaped action log.** Make the action log canonical; derive
+  same project. Real OT or CRDT territory; merge functions
+  per-strip-class. Substrate accommodates; designs deferred.
+- **Redux-shaped action log.** Make the event log canonical, derive
   state from log replay. Compatible with the substrate (versions =
-  log positions). Useful if you want "undo to any prior state"
-  cheaply. Adds latency to writes.
+  log positions); adds write latency.
 
-## 11. What survives from v1
+## 14. What survives from earlier drafts
 
-The v1 doc's content-bearing pieces:
+From v1 / v3:
 
-- **AccessPattern / TimeExpr / IndexExpr ADT.** Unchanged. Section 4
-  here uses it directly.
-- **Static cycle detection extension.** The `(node, time_class)`
-  graph reasoning carries over verbatim.
-- **Structural-determinism predicate.** Still useful, but downgraded
-  to "scheduler skip-recook decision" rather than "cache pinning."
+- **AccessPattern / TimeExpr / IndexExpr ADT** — unchanged. §4
+  uses it directly.
+- **Static cycle detection extension** — unchanged.
+- **Structural-determinism predicate** — unchanged.
+- **COW reference tree + wait-free reads + structural sharing** —
+  unchanged from v3.
+- **Excel DAG processing on top of the tree** — unchanged from v3.
+- **Node-as-writer** — unchanged from v3.
+- **Diagnostics outside the tree** — unchanged from v3.
 
-The v1 framing pieces that got replaced:
+New in v4:
 
-- "Reachability-based cache lifecycle" → became "lineage queries +
-  sparse-load on a COW tree." The reachability framing was function-
-  centric; the COW-tree framing is data-centric. Same observable
-  behavior; different noun structure.
-- "Memoization table" → became "the tree IS the data; there's no
-  separate memo layer." The off-by-one in `8b1c5cd` becomes
-  unrepresentable because there's no shared-state policy loop to
-  begin with.
+- **Envelope/content split as first-class** — §2.
+- **External leaves with primary + substitute refs** — §6.
+- **Resurrection unifies recook / cold-start / rebuild** — §7.
+- **Four-outcome resurrection** (exact / via-substitute /
+  equivalent / lost) — §7.
+- **`failed` cell state tag** — §9.
+- **Refcount-rules-everything for retention** — §10.
+- **Staggered per-strip retention curves** — §10.
+- **Markers as labeled root pointers** — §11.
+- **Transactions as batched root writes** — §11.
+- **`get_at_marker` lineage query** — §12.
 
-## 12. Smallest viable slice
+## 15. Smallest viable slice
 
-The PR plan is reordered to put the substrate first.
+The PR plan from v3, lightly revised:
 
-### PR-r1: AccessPattern ADT (unchanged from v1)
+### PR-r1: AccessPattern ADT (unchanged)
 
 `AccessPattern`, `TimeExpr`, `IndexExpr` in `core/strip_access.py`.
 `NodeSpec.reads_strip_patterns: list[StripAccess] = []`. Pydantic
-round-trip; static rejection of forward-time / forward-self at
-construction. No scheduler, cache, or stenota changes. ~300 lines +
-~150 lines of tests.
+round-trip; static rejection at construction. No scheduler / cache /
+stenota changes. ~300 lines + ~150 lines of tests.
 
-### PR-r2: cycle_validator extension (unchanged from v1)
+### PR-r2: cycle_validator extension (unchanged)
 
 Use typed access patterns where declared; coarse same-strip check
-where not. ~150 lines + ~250 lines of tests.
+where not.
 
 ### PR-r3: COW cell-store substrate
 
-New module `core/cell_store.py`. Implements the tree as a HAMT
-(hash-array-mapped trie) or B-tree-with-structural-sharing variant.
+`core/cell_store.py` — HAMT or B-tree-with-structural-sharing.
 Wait-free reads, CAS atomic writes, sparse load from disk.
+**Envelope and content are first-class separate addresses** with
+independent refcounts.
 
-- `CellStore` interface: `get(cell_id) → Optional[Cell]`,
-  `put(cell, parent_root) → new_root`, `get_at(cell_id, version)`,
-  `get_lineage(cell_id) → list[Cell]`.
-- `InMemoryCellStore` (HAMT-backed).
-- `FilesystemCellStore` (disk-backed; tree blocks stored as content-
-  addressable files; root pointer file CAS-rotated).
-- The existing `node_cache.py` (and the surgical fix in `8b1c5cd`)
-  gets removed in this PR. The whole module goes away.
-- ~1200 lines + ~800 lines of tests. The biggest single PR; the
+- `CellStore` interface: `get_envelope`, `get_content`, `put`
+  (transaction-batched), `get_at`, `get_at_marker`, `get_lineage`,
+  `walk_impact`.
+- `InMemoryCellStore` (HAMT-backed, refcount-driven retention).
+- `FilesystemCellStore` (disk-backed; content-addressable blocks;
+  root pointer file CAS-rotated).
+- `node_cache.py` + the `8b1c5cd` surgical fix both removed.
+- ~1500 lines + ~1000 lines of tests. Largest single PR; the
   substrate is load-bearing.
 
-### PR-r4: dirty propagation + cell metadata
+### PR-r4: dirty propagation + resurrection
 
-- Cell `state` tags, `version`, `inputs`, `recipe`, `writer_node_id`
-  wired through the cooker.
-- Scheduler tick walks dirty set, recooks in topological order, calls
-  `cell_store.put` for each result.
-- `is_deterministic` derived predicate; used to skip recooks of
-  deterministic cells whose `inputs` haven't bumped.
+- Envelope state tags wired through the cooker.
+- Scheduler walks dirty set, recooks in topological order via the
+  unified resurrection operation, batches puts into a transaction.
+- `is_deterministic` predicate; skip recooks for deterministic
+  cells whose `inputs` haven't bumped.
+- `failed` state path: event-log entry on cook failure; envelope
+  carries the tag with a ref into the event log.
 
 ### PR-r5: recipe library + forking
 
 `RecipeTemplate`, `RecipeLibrary`, `RecipeRef`. Library version
 bumps; per-cell forking. UI / API surface for "pin this cell."
 
-### PR-r6: retention policy
+### PR-r6: external leaves + ResourceHandler plugins
 
-RAM working-set bound (LRU on sparse tree subtrees). Disk pruning
-policy (recent / pinned / project-state preserved; everything else
-eligible). User-facing knob in config.
+- `ExternalLeafRef` + `ResourceRef` types.
+- `ResourceHandler` plugin interface; per-scheme implementations
+  (`media://` for files, `live://` for streams, `sensor://` for
+  realtime sensor data, etc.).
+- Primary + substitute resolution with `cooked_from` annotation.
+- Tests cover the live-cook → record-substitution case.
 
-### PR-r7: diagnostics side-channel
+### PR-r7: retention policy
 
-If `events.jsonl` isn't sufficient, formalize the diagnostics stream.
-Probably already enough; this is a placeholder PR for "make sure
-errors and logs have a clean home outside the tree."
+- Per-strip retention rules (in strip registration metadata).
+- Staggered curves implemented as marker-keyed system refs.
+- RAM working-set bound (LRU on system-held refs).
+- Disk pruning (refcount = 0 → drop; envelope-content split
+  honored).
+- User-facing knobs in config.
 
-### PR-r8: stenota migration
+### PR-r8: diagnostics side-channel
 
-Stenota nodes declare access patterns, write through the cell store,
-consume from it. The existing `claims/L2.jsonl` / `claims/L3A.jsonl`
-sidecar files become serialized cell-store output (same on-disk
-format if we keep JSONL as the tree-leaf representation, or a new
-format if HAMT serialization is more efficient).
+If `events.jsonl` isn't sufficient, formalize it. Likely just
+documentation + a small wrapper.
 
-## 13. Relationship to deferred PRs
+### PR-r9: stenota migration
 
-- **PR-n7b (scheduler-v2).** Hare/tortoise = two cookers running
-  against the same tree. With COW substrate this is structurally
-  clean: each holds its own root, writes produce new versions, the
-  tree merges them via CAS. Dirty-queue = the recipe-driven
-  computation of which `(cell)` pairs need recooking. PR-r3 + PR-r4
-  give it the substrate it needs.
+Stenota nodes declare access patterns, write through the cell
+store, consume from it. Existing `claims/L2.jsonl` etc. become
+cell-store-managed.
+
+## 16. Relationship to deferred PRs
+
+- **PR-n7b (scheduler-v2).** Hare/tortoise = two cookers on the
+  same tree, each holding its own root, writes producing new
+  versions, tree merging via CAS. PR-r3 + PR-r4 give it the
+  substrate.
 - **PR-n9b (concrete LLM adapters).** Orthogonal. Not blocked.
-- **PR-s2b (stenota ctx.strip migration).** Subsumed by PR-r8.
+- **PR-s2b (stenota ctx.strip migration).** Subsumed by PR-r9.
 
-## 14. Hard invariants (in addition to existing)
+## 17. Hard invariants
 
-- **Cells are the unit of persistence.** The cell store is the source
-  of truth. Sidecars are the cell store's on-disk representation.
-- **Writes produce new versions.** No in-place cell mutation. Each
-  write through `cell_store.put` produces a new tree root.
-- **Reads are wait-free.** `cell_store.get(cell_id)` never blocks on a
-  writer. Reads from an in-flight cook see the pre-cook value;
-  reads after the cook completes see the new value.
-- **Single writer per cell.** Falls out of the graph wiring; not
-  enforced at the registry layer.
-- **`inputs` records exact versions.** Replaying a cook with the
-  same `inputs` should produce the same result for deterministic
-  recipes. For nondeterministic recipes, the replay is "what would
-  the recipe produce now from these inputs" — a valid answer, not
-  necessarily byte-identical.
-- **Diagnostics live outside the tree.** Errors, logs, traces go to
-  the event log; the tree stays clean.
-- **The sidecar is bounded in practice.** Disk retention is a
-  user-facing policy. The substrate accepts writes; pruning is a
-  separate operation.
-- **Cell `state` tags are observable.** `wet`/`drying`/`dry`/
-  `smudged` (and possibly `failed`) live on the cell, queryable.
-  This is the lifecycle state machine — there's no other.
+- **Cells are the unit of persistence.** Cell store is the source
+  of truth; sidecars are its on-disk representation.
+- **Writes produce new versions.** No in-place mutation. Each put
+  produces a new tree root (within a transaction batch).
+- **Reads are wait-free.** Never block on writers.
+- **Single writer per cell.** Falls out of graph wiring.
+- **`inputs` records exact versions.** Resurrection is deterministic
+  for deterministic recipes given the same input versions and same
+  recipe library version.
+- **Envelopes and content are independently refcounted.** Retention
+  applies independently at each level.
+- **Diagnostics live outside the tree.** Event log; not on cells.
+- **Refcount rules retention.** Policy = when the *system* releases
+  its own refs. User / annotation / in-flight refs override.
+- **External leaves can substitute.** Primary + substitutes
+  ordered; `cooked_from` annotates which was used. Lost-forever
+  is a real outcome; it's surfaced as `Lost`, not silently masked.
+- **Markers are labeled roots.** Multi-axis history navigation
+  (time / transaction / semantic event / user action / recipe-
+  version).
+- **Transactions are batched root writes.** ACID falls out of CAS
+  on a single root pointer per commit.
 
-## 15. Open questions
+## 18. Open questions
 
-- **HAMT vs. B-tree for the substrate.** HAMT is simpler to reason
-  about and has well-known wait-free read properties; B-tree might
-  pack denser for time-ranged strips with regular cadence. Probably
-  HAMT for v0.x; revisit if profiling justifies the complexity.
-- **On-disk tree representation.** Content-addressable blocks (Git-
-  style) or a single LSM-tree-like log? Content-addressable composes
-  well with distributed replicas; LSM has better write throughput.
-  Likely content-addressable for v0.x.
-- **Failed cooks.** Add a `failed` cell state? Or stay with `smudged`
-  + an event-log error entry? Probably `failed` as a fifth tag, with
-  an `error_ref` pointing into the event log for details.
-- **`writer_node_id` portability.** If a graph is edited (node deleted,
-  re-added with a new id), cells written by the old node still
-  reference the old id. Probably fine — `writer_node_id` is a
-  historical fact, not a current pointer. UI may surface "this
+- **HAMT vs B-tree.** HAMT for simplicity / wait-free read
+  properties; revisit if profiling justifies.
+- **On-disk tree representation.** Content-addressable blocks
+  (Git-style) for v0.x; LSM if write throughput dominates later.
+- **Failed cooks.** Confirmed as a `failed` state tag with error
+  refs in the event log. Open: do we retry automatically, or
+  require explicit user action? Probably: retry once with
+  exponential backoff for transient failures (network errors),
+  require user action for persistent failures.
+- **`writer_node_id` portability.** When a graph is edited (node
+  re-id'd or deleted), old cells still reference the old id. Treat
+  as historical fact, not a current pointer. UI may surface "this
   cell's writer no longer exists in the current graph."
-- **Cross-meeting project-state cells.** The project-state layer
-  (`persons/`, `lenses/`, `templates/`) needs cells too, but
-  scoped above any one meeting. `CellId` gains an optional
-  `scope: Literal["meeting", "project"]`? Or a separate root in the
-  tree? Probably the latter.
-- **Substrate concurrency model.** Single-process MVP: CAS on root
-  pointer is enough. Multi-process: the root pointer becomes a
-  filesystem-level resource that needs locking or a coordinator.
-  Out of scope until multi-process is a real requirement.
+- **Cross-meeting project-state cells.** L5-tier state (`persons/`,
+  `lenses/`, `templates/`) needs scoping. Probably: `CellId` gains
+  `scope: Literal["meeting", "project"]`, project cells live in a
+  separate root with cross-meeting roots referencing them.
+- **Substrate concurrency.** Single-process: CAS on root pointer
+  is enough. Multi-process: filesystem-level lock or coordinator
+  process. Out of scope until multi-process is a real requirement.
+- **Marker GC.** When are markers themselves prunable? If marker
+  M_old has no labeled queries and no system-policy holds it,
+  drop it. Refcount applies to markers the same way it applies to
+  cells.
+- **Substitute discovery for already-cooked cells.** If a cell was
+  cooked live-only and no substitute was recorded then, can the
+  user later attach a substitute (e.g., "I have the recording now,
+  please use it for rebuilds")? Probably yes via an envelope-level
+  annotation, but the mechanics need design.
 
-## 16. Connections to existing MEMORY entries
+## 19. Connections to MEMORY entries
 
-- **`abstraction_discipline.md`** — "no `if provider == ...` in core."
-  Same principle: no `if is_deterministic` flag in storage; structural
-  property derived from declarations.
-- **`structural_over_policy.md`** — flag-based policy in loops on
-  shared state is a design smell. The COW substrate makes
+- **`abstraction_discipline.md`** — no provider-name branching in
+  core. Same principle: no `is_deterministic` flag in storage;
+  structural property derived from declarations.
+- **`structural_over_policy.md`** — flag-based policy in shared-
+  state loops is a design smell. COW substrate makes
   flag-discriminated eviction unrepresentable.
 - **`mutability_is_figurative.md`** — wet/drying/dry/smudged as UI
-  tag, not state machine. Reinforced: tags live on cells, observable,
-  but there's no separate scheduler-state structure.
-- **`annealing_not_constraints.md`** — labels are observations, not
-  constraints. Reinforced: pin flags are user-affordances on cells,
-  not registry-level policy.
-- **`signals_and_slots.md`** — subscription layer tailing the event
-  log. Compatible: subscriptions watch the event log (which is where
-  diagnostics live), separate from the cell store (which is where
-  data lives).
+  tag, not state machine. Reinforced: tags live on envelopes,
+  observable, no separate scheduler-state structure.
+- **`annealing_not_constraints.md`** — labels are observations,
+  not constraints. Reinforced: pin flags are user affordances on
+  cells, not registry-level policy.
+- **`signals_and_slots.md`** — subscription layer tailing event
+  log. Compatible: subscriptions watch the event log; separate
+  from the cell store.
 - **`chunk_size_principle.md`** — chunk size is tractability, not
   granularity. Compatible: cell granularity is whatever a recipe
-  outputs; the substrate doesn't care.
+  outputs.
 
-## 17. tl;dr
+## 20. tl;dr
 
 **Structure:** sparse-replica COW reference tree, wait-free reads,
-versioned writes. The tree is the storage; nothing else is.
+versioned writes. Cells split into envelope (cheap, the
+resurrection slate) and content (expensive, the actual data),
+independently addressable and independently refcounted.
 
-**Processing:** excel DAG over the tree. Cells reference predecessor
-cells via typed access patterns. Recook walks dirty cells in
-topological order; each recook writes a new cell version through the
-substrate.
+**Processing:** excel DAG over the tree. Cells reference
+predecessors via typed access patterns. Recook walks dirty cells
+in topological order; each recook is a resurrection (recipe
+applied to `envelope.inputs` + `envelope.leaves`).
 
-**Writer identity is the node.** Each node emits one output dict per
-cook; that dict becomes one cell's content. Single-writer-per-cell
-falls out structurally, no registry needed.
+**Resurrection unifies** recook / cold-start / rebuild. Four
+outcomes: exact / via-substitute / equivalent / lost. External
+leaves with primary + substitute resource refs enable proxy-edit
+patterns (live cook, durable rebuild).
 
-**Diagnostics live outside the tree.** Event log for errors / logs /
-traces. The tree stays clean: data, or data-pending-with-tags.
+**Writer identity is the node.** Single-writer-per-cell falls out
+of graph wiring; no registry rejection needed.
 
-**Retention is two-tier.** RAM = sparse working set, lossless LRU.
-Disk = real budget with user-facing policy (recent / pinned /
-project-state preserved; rest eligible for pruning).
+**Diagnostics live outside the tree.** Event log for errors / logs
+/ traces. Tree stays clean: data, or data-pending-with-tags.
 
-**Lineage is queryable.** Each cell records exact input versions;
-walk upstream / downstream for "what depends on this?" / "what
-produced this?". Default API returns latest; lineage is opt-in.
+**Retention is refcount-driven.** Per-strip, per-envelope-vs-
+content, with staggered density curves. User / annotation / in-
+flight refs always override policy. Pruning is just the system
+releasing its own refs.
 
-**MVP boundary:** single-writer-per-cell + COW + sparse load. No
-CRDT, no OT, no merging beyond disjoint-write CAS. Multi-instance
-live edit is a future feature; the substrate accommodates it without
-preempting design space.
+**Markers generalize beyond time** (labeled root pointers; multi-
+axis history navigation). **Transactions** fall out of batched
+root writes (ACID on a single CAS).
 
-Concrete next step: PR-r1 (the AccessPattern ADT, declarative-only).
-Unchanged from v1. PR-r3 (the COW cell store) is the biggest single
-PR and where `node_cache.py` + the `8b1c5cd` surgical fix both
-disappear.
+**MVP boundary:** single-writer-per-cell + COW + sparse load +
+batched transactions. No CRDT, no OT, no merging beyond disjoint
+writes. Multi-instance live edit accommodates without requiring
+upfront commitment.
+
+Concrete next step: PR-r1 (the AccessPattern ADT). Unchanged across
+drafts. PR-r3 (the COW cell store with envelope/content split) is
+the largest PR and where `node_cache.py` + the `8b1c5cd` surgical
+fix both go away.
 
 If parts of the framing feel off, flag in chat before any code.

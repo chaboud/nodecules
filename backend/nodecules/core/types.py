@@ -7,6 +7,8 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
+from .strip_access import StripAccess
+
 
 class NodeStatus(str, Enum):
     """Node execution status."""
@@ -124,6 +126,7 @@ class NodeSpec:
     PR-n6 added: (DerivationPhase enum, no NodeSpec change).
     PR-n7 added: settling_windows.
     PR-n8 added: reads_env, writes_env.
+    PR-r1 added: reads_strip_patterns.
     """
     node_type: str
     display_name: str
@@ -151,6 +154,13 @@ class NodeSpec:
     # canonical from window 0. The scheduler-v2 cooker uses this to compute
     # pre-roll depth (see TEMPORALITY-ROADMAP.md § PR-n7).
     settling_windows: int = 0
+    # --- Typed strip access (PR-r1). ---
+    # How this node reads each strip it depends on, as data. `reads_strips`
+    # (PR-n4) names *which* strips; `reads_strip_patterns` says *how*. The
+    # scheduler derives ordering, the cycle validator reasons statically,
+    # and cache keys incorporate these — without running the node. Empty =
+    # the node uses the runtime strip API and is not statically analyzable.
+    reads_strip_patterns: List[StripAccess] = field(default_factory=list)
 
 
 @dataclass

@@ -1,13 +1,16 @@
 # REFERENCE-MODEL.md — declarative generation DAG over a COW node store
 
-**Status:** design proposal, no code yet. Sixth draft. v5 unified
-everything as a node in an acyclic generation DAG (Part I) and
-separated implementation concerns (Part II); v6 bakes in **scope**
-as a first-class structural concept — resolving v5's §23
-multi-meeting open question, supporting concurrent instance
-identity (playground tabs, parallel cookers, IIR self-reference)
-without collapsing cache keys, and giving the existing runtime a
-clean integration point.
+**Status:** Part I (the model) is design-only. Part II is design with
+two pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
+access-pattern ADT — and **PR-r2** (`ba9835a`) — the access-pattern
+resolver. The rest of Part II is unbuilt.
+
+Seventh draft. v6 baked in **scope** as a first-class structural
+concept; v7 folds in **instance continuation / the settling spectrum**
+— how IIR-style nodes (audio filters, recursive video filters, VLM
+change-notices, rolling summaries) are recovered without an O(N²)
+explosion — and syncs §5 / §24 to the code PR-r1 and PR-r2 actually
+shipped.
 
 Evolution:
 - v1 (`2cd3233`) — functional dataflow with reachability cache.
@@ -17,9 +20,10 @@ Evolution:
   substitution + resurrection outcomes.
 - v5 (`726def5`) — radical unification: flat node graph, kinds
   first-class, manifests as version anchors.
-- v6 (this) — scope first-class; instance identity as scope;
-  manifests per scope; cross-scope refs explicit; three new PRs for
-  live inputs, output sinks, and importable examples.
+- v6 (`0e80dec`) — scope first-class; instance identity as scope;
+  per-scope manifests; live inputs / sinks / examples PRs.
+- v7 (this) — the settling spectrum (§17); §5 ADT synced to shipped
+  PR-r1; PR plan synced to shipped PR-r1 + PR-r2.
 
 ---
 
@@ -85,7 +89,7 @@ Common kinds (stenota-shaped, illustrative not exhaustive):
   Separate node kind; not a property of other nodes.
 - `recipe.template` — versioned recipe templates referenced by
   other nodes.
-- `router.*` — pick among alternatives at generation time (§17).
+- `router.*` — pick among alternatives at generation time (§18).
 - `sink.*` — output kinds (display widgets, audio playback, file
   writers, MCP broadcast).
 - `scope` — see §4.
@@ -130,10 +134,10 @@ Why this matters:
   `meeting/abc123` scope. Cross-meeting state (person registry,
   shared recipes) lives in scopes higher up. Cross-meeting refs
   are visible in the data.
-- **IIR / self-reference.** A node reading `strip[me - 1]` resolves
-  "me" relative to the cooker's scope. Different cookers see
-  different selves; no risk of one cooker's IIR state polluting
-  another's.
+- **IIR / self-reference.** A node reading its own prior output
+  resolves "me" relative to the cooker's scope. Different cookers
+  see different selves; no risk of one cooker's continuation state
+  polluting another's. (The settling mechanics are §17.)
 - **Isolation for tests.** Running a graph in isolation = creating
   a fresh scope. No global state to clean up.
 
@@ -143,7 +147,8 @@ deployment-tier concern). They're identity + lifecycle boundaries.
 ## 5. Edges
 
 Edges are typed references between nodes. A node declares its edges
-via **typed access patterns** (the ADT from v1, unchanged):
+via **typed access patterns** — the ADT shipped in PR-r1
+(`core/strip_access.py`):
 
 ```python
 class Edge(BaseModel):
@@ -151,32 +156,36 @@ class Edge(BaseModel):
     target_scope: Optional[ScopeRef] = None   # None = same scope as source
     pattern: AccessPattern
 
-class AccessPattern:
-    Latest
-    Range(start: TimeExpr, end: TimeExpr)
-    Before(at: TimeExpr) / After(at: TimeExpr)
-    OrdinalAt(index: IndexExpr) / OrdinalRange(start, end: IndexExpr)
-    SelfRelativeOrdinal(offset: PositiveInt)
+# AccessPattern — the three shapes the real stenota graph uses,
+# discriminated on a `kind` field:
+class AllPattern      # whole-strip read (turns, participation, speaker_relabel)
+class LatestPattern   # single most-recent element (asr/diar read audio.wav)
+class RangePattern    # windowed read; (field, start: TimeExpr, end: TimeExpr)
 
-class TimeExpr:    # symbolic; resolved at generation time
-    SelfWindowStart / SelfWindowEnd
-    SelfWindowStart - Duration / SelfWindowEnd - Duration
-    AbsoluteMs(int)
-
-class IndexExpr:
-    SelfElementIndex
-    SelfElementIndex - PositiveInt
-    AbsoluteIndex(int)
+# TimeExpr — symbolic, resolved at generation time:
+class SelfWindowStart / SelfWindowEnd
+class AbsoluteMs(ms >= 0)
 ```
+
+PR-r1 deliberately shipped *three* patterns, not the seven v6 drafted.
+The cut four (`Before`/`After`/`OrdinalAt`/`OrdinalRange`/
+`SelfRelativeOrdinal`) were speculation — no node in the real stenota
+graph used them. **`SelfPrevious`** — the IIR self-reference pattern
+(`strip[me-1]`) — is deferred until the first settling windowed node
+is built, and when added it ships *bundled* with the retention rule
+in §17, never as a bare pattern.
+
+`RangePattern` carries a `field` selector because a strip element can
+hold more than one temporal attribute (a claim has `source_window`
+and `time_ranges`); a windowed read must name which it tests.
 
 The graph is **acyclic by construction**:
 
 - Forward-time and forward-self references are rejected at the ADT
-  level.
-- Cross-node cycles are rejected at graph-load by an extended cycle
-  validator (builds the `(node, time_class)` DAG, rejects cycles in
-  the `present`-only subgraph).
-- **Cross-scope cycles** are similarly rejected — the cycle validator
+  level (the cut patterns and `SelfPrevious` would have carried that
+  risk; the shipped three cannot express a forward reference).
+- Cross-node cycles are rejected at graph-load by the cycle validator.
+- **Cross-scope cycles** are similarly rejected — the validator
   walks the union graph (within + across scopes).
 
 A node without typed access patterns falls back to dynamic
@@ -208,7 +217,7 @@ A generation can have four outcomes:
 
 1. **Exact** — every referenced node resolves, recipe is
    deterministic; result is byte-identical to a prior generation.
-2. **Via substitute** — a routing node (§17) chose a different
+2. **Via substitute** — a routing node (§18) chose a different
    upstream than originally; result may differ in form but is
    semantically the same.
 3. **Equivalent** — recipe is nondeterministic (unfixed-seed LLM,
@@ -216,6 +225,10 @@ A generation can have four outcomes:
    is *a* valid value, not the original.
 4. **Lost** — some referenced node is unrecoverable and no
    substitute resolves. Returns a `Lost` sentinel.
+
+For nodes that reference *their own* prior output (IIR / settling
+nodes), the cost and recoverability of resurrection depend on where
+the node sits on the settling spectrum — see §17.
 
 ## 7. Manifests anchor versions (per scope)
 
@@ -342,6 +355,11 @@ month: daily. Older: weekly. Configurable per kind + per scope.
 Cheap because structural sharing means N retained versions overlap
 heavily.
 
+A **settling node** (§17) overrides the curve for its own output:
+it retains its last K cells unconditionally while it advances,
+where K is its settle depth. That floor is not negotiable — see
+the O(N²) explosion in §17.
+
 ## 12. Sparse load (RAM + disk)
 
 Two tiers:
@@ -429,11 +447,117 @@ content is pruned but envelope remains, reads return
 `Absent(rebuild_via=envelope_id)`. The UI / scheduler can trigger
 resurrection.
 
+For an IIR / settling node the content node carries two parts — the
+public output and the private continuation state (§17). Both are
+covered by the envelope's rebuild metadata.
+
 This is the v4 envelope/content split as an **implementation
 pattern**, not a conceptual one. In the model (§§1-8), they're
 just two nodes referencing each other.
 
-## 17. Live-vs-file routing is graph structure
+## 17. Instance continuation: the settling spectrum
+
+An **IIR node** is one whose output at window N depends on its own
+prior output. Naively resolved, that is O(N²): producing window N
+recomputes N-1, which recomputes N-2… Whether a node can dodge that
+— and whether it can be resurrected at all — is governed by one
+axis: **settling depth**.
+
+### Settling depth is a spectrum
+
+How far back does a node's dependence on its own past actually
+*matter*?
+
+- **K = 0 — memoryless.** Most current stenota nodes (turns,
+  participation, ASR run whole-file). No carried state.
+- **small K — settles fast.** Audio IIR filters, recursive video
+  filters (temporal denoise / motion smoothing), a recurrent VAD
+  (Silero), quick VLM change-notices. The impulse response decays
+  geometrically; after K windows the initial condition is forgotten.
+- **large K — settles slowly**, but still finite.
+- **K = ∞ — path-dependent.** Never settles; the influence of
+  window 1 rides forward forever. Appended document layout (each
+  element's position depends on all prior layout); a rolling
+  *cumulative* LLM journal (a fact from hour 1 rides forward in the
+  compressed summary indefinitely).
+
+The common case is finite, usually small, K. **Genuinely
+path-dependent (K = ∞) is exceedingly rare** — it is the "must
+re-run serially on absolutely everything" case, and most things
+people reach for (filters, change-notices, smoothers) are not it.
+
+### Recoverability follows from K
+
+| Class | Recover by | Cost | Retention |
+|---|---|---|---|
+| Settling (finite K) | cold-start, warm up K windows from any reasonable initial state; output from window K on is canonical | O(K) | retain last K output cells |
+| Path-dependent (K=∞) + deterministic | faithful serial replay from t=0 | O(N) | optional — replayable |
+| Path-dependent (K=∞) + nondeterministic | **cannot** — replay yields a *different* history | — | **pin the chain; correctness, not perf** |
+
+For settling nodes, determinism barely matters — a deterministic
+filter converges onto its true trajectory, a nondeterministic one
+jitters within ε of it; either way the warmed-up output is treated
+as interchangeable. Determinism is decisive **only at K = ∞**:
+there it is the line between "faithfully replayable" and "the cell
+chain is the only copy of the artifact."
+
+So the functional divide is **recoverable vs not**, and the
+not-recoverable set is exactly one quadrant — path-dependent ∧
+nondeterministic. Everything else re-derives into something
+interchangeable (settling) or identical (deterministic replay).
+
+### The O(N²) explosion
+
+A settling node's window N reads window N-1's output. If N-1's cell
+is **retained** → O(1) read → O(N) for the strip. If N-1 was
+**pruned** and must be resurrected, resurrection needs N-2, which
+needs N-3 — every window triggers a full back-recursion: **O(N²)**.
+
+The defense is the retention floor in §11: a settling node retains
+its last K output cells unconditionally while it advances. The
+`SelfPrevious` access pattern (deferred from PR-r1, §5) must
+therefore ship **bundled** with this retention implication — the
+access pattern and the retention rule are not independent. A bare
+self-reference pattern is a loaded gun.
+
+### Carried state is not always tidy data
+
+The continuation state an IIR node hands forward can be a single
+float (an EMA accumulator), a structured value (a rolling summary's
+prior text), or an opaque tensor (a recurrent model's hidden state).
+An IIR node's output cell therefore carries **two** things: the
+public `output`, and the private `carried_state`. Downstream
+consumers read `output`; the node's own next window reads
+`carried_state`. The cell model (§16) accommodates this directly.
+
+### Instance continuation proper
+
+The strongest form keeps the node instance *and its carried state*
+RAM-resident across the whole strip, checkpointing to a cell each
+window for durability / resume. That is a constant-factor win on top
+of the O(K) / O(N) floor — safe to treat as a pure cache, because
+the carried state is always reconstructible from the last checkpoint
+cell (settling) or by replay (deterministic path-dependent).
+
+### Cook order
+
+Settling and path-dependent nodes both cook forward (N-1 before N).
+Settling nodes additionally tolerate **parallel / out-of-order**
+cooking *if* each segment gets K windows of pre-roll. Path-dependent
+nodes are strictly serial.
+
+### Declaration
+
+A node declares its place on the spectrum. `settling_windows` on
+`NodeSpec` (PR-n7, previously unused) carries K for settling nodes;
+the K warm-up windows are `phase=warmup` (DerivationPhase, PR-n6),
+then `phase=canonical`. Path-dependent (K = ∞) needs its own marker
+— `settling_windows` can't express ∞ (open question, §28).
+`is_deterministic` (PR-n4) is the second axis, decisive only at
+K = ∞. The substrate reads both and picks retention + cook-order +
+resurrection straight from the table above.
+
+## 18. Live-vs-file routing is graph structure
 
 The proxy-edit pattern — cook from a live stream while recording to
 a file, then later rebuild from the recording — is graph structure,
@@ -461,7 +585,7 @@ storage outside the node store. A `ResourceHandler` plugin keyed by
 URI scheme fetches the bytes. The node store knows the *reference*,
 not the bytes; the handler knows the bytes.
 
-## 18. Live inputs (mic / camera / sensors)
+## 19. Live inputs (mic / camera / sensors)
 
 Live-capture node kinds bridge hardware → node graph. Each is a
 small plugin around an OS API:
@@ -485,7 +609,10 @@ itself is ephemeral. Retention applies to the *recorded form*
 to *derived nodes* (ASR segments, etc.). The `raw.audio.live` node
 itself typically retains "latest only."
 
-## 19. Output sinks
+A live streaming model (Silero VAD, streaming ASR) run windowed is
+a settling node — see §17; its hidden state is `carried_state`.
+
+## 20. Output sinks
 
 Sink kinds consume cooked node values and route them somewhere
 observable:
@@ -504,7 +631,7 @@ matching React components to `sink.*` kinds — an oscilloscope
 sink in the graph editor renders as an oscilloscope panel in the
 playground view.
 
-## 20. Diagnostics live outside the node store
+## 21. Diagnostics live outside the node store
 
 Errors, logs, traces, perf metrics live in the **event log**
 (`events.jsonl`), not in the node store. The store is *data*;
@@ -518,7 +645,7 @@ event log, parented analogously to manifests.
 Subscription consumers (`MEMORY.md` → `signals_and_slots.md`) tail
 the event log; independent of node-store operations.
 
-## 21. Concurrency
+## 22. Concurrency
 
 MVP: per-scope single-producer-per-node-id, batched transactions
 within a scope.
@@ -545,11 +672,11 @@ Future (out of scope for v0.x):
 
 # Part III — Working notes
 
-## 22. What survives, what changed
+## 23. What survives, what changed
 
 Survives from earlier drafts unchanged:
 
-- AccessPattern / TimeExpr / IndexExpr ADT (v1).
+- AccessPattern / TimeExpr ADT (v1 concept; shipped PR-r1).
 - Static cycle detection (v1, extended in v5 + v6 for cross-scope).
 - COW substrate + wait-free reads + structural sharing (v3).
 - Refcount-driven retention (v4).
@@ -558,22 +685,23 @@ Survives from earlier drafts unchanged:
 - Four resurrection outcomes (v4).
 - Everything-is-a-node unification (v5).
 - First-class kinds (v5).
+- Scopes as first-class (v6).
 
-New in v6:
+New / changed in v7:
 
-- **Scopes as first-class.** Hierarchical, with per-scope manifest
-  sequences. Resolves v5 §23.
-- **Cross-scope edges.** Explicit references; cycle validator
-  walks the union graph.
-- **Live input node kinds.** `raw.audio.live`, `raw.video.live`,
-  `raw.sensor.*`. §18.
-- **Output sink node kinds.** `sink.audio_playback`,
-  `sink.video_preview`, `sink.oscilloscope`, `sink.spectrogram`,
-  `sink.text_display`, `sink.file_write`, `sink.mcp_broadcast`.
-  §19.
-- **Examples library** — importable, not baked-in. §23.
+- **The settling spectrum** (§17). IIR-style nodes are placed on a
+  K-axis (memoryless → fast-settling → slow-settling → path-
+  dependent). Recoverability follows from K; determinism is decisive
+  only at K = ∞. Carried-state-in-cell, the O(N²) explosion + its
+  retention defense, cook-order rules.
+- **§5 synced to shipped code.** PR-r1 shipped three access patterns
+  (`All` / `Latest` / `Range`), not v6's drafted seven. `SelfPrevious`
+  is deferred and retention-coupled.
+- **PR plan synced** — PR-r1 and PR-r2 are shipped; PR-r2 was
+  repurposed from cycle_validator extension to the access-pattern
+  resolver (§24).
 
-## 23. Examples as an importable library
+## 24. Examples as an importable library
 
 The repo's `examples/` directory holds reference graph definitions:
 
@@ -606,21 +734,29 @@ Example graphs live in `project/examples` scope (or similar) in
 the node store so they version cleanly; users importing them get
 their own copies in their own scopes.
 
-## 24. PR plan (revised for v6)
+## 25. PR plan
 
-Adding three PRs for the playground / live-runtime work; minor
-tweaks to r3/r4 for scope mechanics.
+Shipped:
 
-### PR-r1: AccessPattern ADT
-Unchanged across all drafts. ~300 + 150 LOC.
+### PR-r1: typed access-pattern ADT — SHIPPED (`a40772c`)
+`core/strip_access.py`: `TimeExpr`, `AccessPattern` (`All` / `Latest`
+/ `Range`), `StripAccess`; `NodeSpec.reads_strip_patterns`. Grounded
+against all nine stenota nodes; three patterns, not seven. 25 tests.
 
-### PR-r2: cycle_validator extension
-Now also handles cross-scope cycles. ~200 + 300 LOC.
+### PR-r2: access-pattern resolver — SHIPPED (`ba9835a`)
+`core/strip_resolve.py`: `resolve_time_expr`, `resolve_range`,
+`range_matches`. Repurposed from the v6-planned cycle_validator
+extension, which was found near-empty (within-window cycles are
+detectable from strip names alone, and the grounded ADT has no
+past/future-direction patterns to exploit). 14 tests.
+
+Unbuilt:
 
 ### PR-r3: Node store substrate (per scope)
 HAMT-backed; wait-free reads; CAS atomic writes; sparse load.
-**Per-scope manifest sequences; scope ids in node addressing.**
-Single API: `get_node(scope, id) → Optional[Node] | Absent | Lost`.
+Per-scope manifest sequences; scope ids in node addressing.
+`get_node(scope, id) → Optional[Node] | Absent | Lost`.
+**Must be IIR-aware:** cells carry `(output, carried_state)` (§17).
 ~1400 + 900 LOC.
 
 ### PR-r4: Kind system
@@ -630,11 +766,13 @@ interfaces. Runtime kind addition. ~400 + 300 LOC.
 ### PR-r5: Generation engine
 "Produce node X" as a unified primitive. Dirty propagation,
 resurrection, cold-start all routed through it. Four-outcome
-return. ~600 + 500 LOC.
+return. **Must be IIR-aware:** settling-node warm-up resurrection
+(§17). ~600 + 500 LOC.
 
 ### PR-r6: Retention policies + refcount mechanics
 Per-kind retention curves. System refs vs user/in-flight refs.
-Disk pruning. ~400 + 300 LOC.
+Disk pruning. **Must be IIR-aware:** the keep-last-K retention
+floor for settling nodes (§17). ~400 + 300 LOC.
 
 ### PR-r7: Indexes
 Strip-position, kind, lineage (reverse), marker history,
@@ -657,35 +795,41 @@ Stenota nodes declare access patterns, scope appropriately, write
 through the node store. Cooking levels become kind declarations.
 ~800 + 400 LOC.
 
-### PR-r12: Live input node kinds (NEW)
+### PR-r12: Live input node kinds
 `raw.audio.live` (Core Audio / PortAudio), `raw.video.live`
 (AVFoundation / V4L2), `raw.sensor.*` placeholders. Each is a
 plugin wrapping an OS API. Multiplexing logic in `ResourceHandler`
 for shared hardware. ~600 + 300 LOC across plugins.
 
-### PR-r13: Output sinks + UI widgets (NEW)
+### PR-r13: Output sinks + UI widgets
 `sink.*` node kinds + matching React components (oscilloscope,
 spectrogram, video preview, text display, audio playback). The UI
-binds widgets to sinks by kind. Existing API endpoints extend with
-streaming subscriptions for live data. ~700 + 400 LOC across
-backend + frontend.
+binds widgets to sinks by kind. ~700 + 400 LOC across backend +
+frontend.
 
-### PR-r14: Examples library + import action (NEW)
+### PR-r14: Examples library + import action
 `examples/` directory at repo root with starter graphs. "Import
-example" UI action in the editor. Examples are loaded into the
-user's scope, not the example scope; the user fork-edits-saves.
-~200 LOC + a handful of JSON files.
+example" UI action in the editor. ~200 LOC + a handful of JSON files.
 
-## 25. Relationship to deferred PRs
+### PR-r15: SelfPrevious access pattern + IIR wiring
+The deferred IIR self-reference pattern (§5, §17). Ships *bundled*
+with the keep-last-K retention rule and the forward-cook
+requirement — never as a bare pattern. Lands when the first
+settling windowed node is built to ground it (a recursive video
+filter or a windowed Silero node is the likely first). ~250 +
+300 LOC.
+
+## 26. Relationship to deferred PRs
 
 - **PR-n7b (scheduler-v2).** Hare/tortoise = two cookers in the
   same scope, each holding its own manifest, writes producing new
   manifests, scope's tree merging via CAS. PR-r3 + PR-r5 + PR-r8
-  give it the substrate.
+  give it the substrate. The settling-spectrum cook-order rules
+  (§17) are scheduler-v2's pre-roll logic.
 - **PR-n9b (concrete LLM adapters).** Orthogonal; not blocked.
 - **PR-s2b (stenota ctx.strip migration).** Subsumed by PR-r11.
 
-## 26. Hard invariants
+## 27. Hard invariants
 
 - **Everything is a node.** No bespoke types for cells, envelopes,
   recipes, annotations, routers, sinks, scopes, manifests.
@@ -702,6 +846,10 @@ user's scope, not the example scope; the user fork-edits-saves.
   coordinated explicitly, not implicit.
 - **Refcount rules retention.** Policy = when the system releases
   its own refs. User / annotation / in-flight refs override.
+- **IIR access patterns are retention-coupled.** A self-reference
+  pattern (`SelfPrevious`) cannot ship without the keep-last-K
+  retention floor for the strip it reads. An uncoupled one is the
+  O(N²) explosion (§17).
 - **Diagnostics live outside the node store.** Per-scope event
   logs.
 - **Routing is graph structure.** Substitution, fallback, retry,
@@ -712,12 +860,23 @@ user's scope, not the example scope; the user fork-edits-saves.
 - **The declarative model (Part I) is the spec.** Part II changes
   if memory or compute needs evolve; Part I doesn't.
 
-## 27. Open questions
+## 28. Open questions
 
 - **Node id format.** Within-scope ids: kind-prefixed
   (`envelope:strips/...`) or opaque? Per user input: kind is first-
   class, so likely an opaque id + kind field, with prefixed naming
   as a convention for human readability.
+- **Path-dependent marker.** `settling_windows` carries finite K
+  for settling nodes; it can't express K = ∞. Path-dependent nodes
+  need a distinct marker — a sentinel value, or a companion
+  `path_dependent: bool`. The substrate uses it to pick serial cook
+  + chain-pin retention (§17).
+- **Carried-state cell shape.** §17 says an IIR cell's content is
+  `(output, carried_state)`. Is `carried_state` a sub-field of the
+  content dict, or a separate node the output edges to? Likely a
+  sub-field (it travels with the output), but a separate node would
+  let retention prune `output` while keeping `carried_state`. TBD
+  when PR-r15 grounds it.
 - **Cross-scope read consistency.** When a node in scope A reads
   from scope B, does it pin to B's manifest at the time of A's
   read, or always read B's latest? Probably: explicit choice in
@@ -742,7 +901,7 @@ user's scope, not the example scope; the user fork-edits-saves.
   scope. Multi-process: filesystem locking per scope or a
   coordinator. Out of scope until multi-process is real.
 
-## 28. Connections to MEMORY entries
+## 29. Connections to MEMORY entries
 
 - `abstraction_discipline.md` — no provider-name branching. Same
   principle: no kind-name or scope-kind branching inside
@@ -759,7 +918,7 @@ user's scope, not the example scope; the user fork-edits-saves.
 - `project_state_layer.md` — explicitly resolved here: project
   state is just a higher-up scope in the hierarchy.
 
-## 29. tl;dr
+## 30. tl;dr
 
 **Part I (the model):** everything is a node in an acyclic
 generation DAG. Nodes have kinds (first-class) and live in scopes
@@ -773,22 +932,25 @@ per scope, wait-free reads, refcount retention with per-kind
 staggered curves, sparse load from disk, indexes for ergonomic
 queries, markers as labeled manifests, transactions as batched
 manifest updates within a scope, pruning + resurrection via
-envelope kinds, routing / live inputs / output sinks as graph
-nodes, diagnostics side-channel via per-scope event logs.
+envelope kinds, the settling spectrum for IIR nodes, routing /
+live inputs / output sinks as graph nodes, diagnostics
+side-channel via per-scope event logs.
 
-**Scope is the missing piece from v5.** Resolves multi-meeting
-identity, concurrent playground tabs, IIR self-reference, test
-isolation — all the same mechanism. A scope is just a node with a
-parent and its own manifest sequence; cross-scope refs are edges
-that name a target scope.
+**The settling spectrum (v7).** IIR nodes sit on a K-axis:
+memoryless → fast-settling (audio/video filters, VLM change-
+notices) → slow-settling → path-dependent. Settling nodes recover
+by K-window warm-up and need only the last K cells retained;
+path-dependent nodes split on determinism (replayable vs
+unrecoverable). Genuinely path-dependent is rare; most real IIR
+work settles fast.
+
+**Shipped:** PR-r1 (access-pattern ADT) and PR-r2 (resolver) are
+code. PR-r3 (the COW node store substrate, per-scope manifests,
+IIR-aware cells) is the load-bearing next PR.
 
 **MVP boundary:** per-scope single-producer-per-node + COW +
 sparse load + batched per-scope transactions. No CRDT, no OT, no
 cross-scope atomic transactions, no merging beyond disjoint writes
 within a scope.
-
-**Concrete next step:** PR-r1 (the AccessPattern ADT). Unchanged
-across all six drafts. PR-r3 (the COW node store substrate with
-per-scope manifests) is the load-bearing PR.
 
 If parts of the framing feel off, flag in chat before any code.

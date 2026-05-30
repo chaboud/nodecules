@@ -862,6 +862,23 @@ filter or a windowed Silero node is the likely first). ~250 +
 
 ## 28. Open questions
 
+- **Sources as strips.** Media inputs (files, live streams) are
+  conceptually strips: each contained stream is a strip of frames /
+  samples / packets, with the source itself a parent grouping them.
+  "Global" source properties (overall extent, container-level
+  metadata) are strips with a single element spanning the whole time
+  window — the strip metaphor degrades gracefully into the
+  single-element case. Cross-stream alignment within a source, and
+  cross-source alignment with clock-drift modeling, are properties
+  of the source / parent node, not file-format characteristics read
+  ad-hoc at use sites. Legacy / inferred-extent containers (AVI-style
+  files where stream durations are absent and must be derived from
+  packet counts or container hints) need first-class support — the
+  inferred-vs-labeled distinction is part of what the source node
+  carries. **Current stopgap:** `stenota_graph` CLI's
+  `_duration_ms_from_container` is a band-aid hierarchy over PyAV
+  characteristics, explicitly labeled — it disappears when a
+  `source.media` kind lands.
 - **Node id format.** Within-scope ids: kind-prefixed
   (`envelope:strips/...`) or opaque? Per user input: kind is first-
   class, so likely an opaque id + kind field, with prefixed naming

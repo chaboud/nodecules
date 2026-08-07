@@ -1,0 +1,171 @@
+"""The bench. Run: python3 bench.py
+
+Four experiments, each pressure-testing one design assertion. Every one prints
+a PASS/FAIL/NUMBER rather than an opinion.
+"""
+
+from __future__ import annotations
+
+import math
+
+import cas
+import classify
+import nodes
+
+
+def hdr(n: int, title: str, adr: str) -> None:
+    print(f"\n{'=' * 74}\nE{n}. {title}\n    ({adr})\n{'=' * 74}")
+
+
+# --- E1: is hash(code) a usable substitute for a version string? -----------
+
+def e1_identity() -> None:
+    hdr(1, "Node identity from hash(code), not a declared version string",
+        "ADR-0003 lower layer; nodecules feat/temporality gap")
+
+    for strat in ("source", "ast"):
+        h1 = cas.code_hash(nodes.rgb_to_yuv, strat)
+        h2 = cas.code_hash(nodes.rgb_to_yuv, strat)
+        print(f"  {strat:6s}  stable across calls: {h1 == h2}   {h1[:16]}")
+
+    # A comment-only edit, simulated by hashing two source strings that differ
+    # only in a comment.
+    import ast as _ast
+    import hashlib
+
+    a = "def f(x):\n    return x + 1\n"
+    b = "def f(x):\n    # a comment that changes nothing\n    return x + 1\n"
+    src_differs = hashlib.sha256(a.encode()).hexdigest() != hashlib.sha256(b.encode()).hexdigest()
+    ast_differs = (_ast.dump(_ast.parse(a), include_attributes=False)
+                   != _ast.dump(_ast.parse(b), include_attributes=False))
+    print(f"\n  comment-only edit -> source hash changes: {src_differs}")
+    print(f"  comment-only edit -> ast    hash changes: {ast_differs}")
+    print("  => `ast` avoids throwing away every cached result on a comment edit.")
+
+    # A real behaviour change must change the hash under both.
+    c = "def f(x):\n    return x + 2\n"
+    ast_changed = (_ast.dump(_ast.parse(a), include_attributes=False)
+                   != _ast.dump(_ast.parse(c), include_attributes=False))
+    print(f"  behaviour change  -> ast    hash changes: {ast_changed}  (required)")
+
+
+# --- E2: can perturbation be detected automatically? -----------------------
+
+def e2_classification() -> None:
+    hdr(2, "Automatic perturbation classification",
+        "ADR-0009 default-to-perturbing; P-25 coverage manifest")
+
+    expected = {
+        "rgb_to_yuv": "pure", "rgb_to_hsl": "pure", "hsl_to_yuv": "pure",
+        "scale": "pure", "seeded_jitter": "pure",
+        "stamp_now": "perturbing", "jitter": "perturbing",
+        "read_env_scale": "perturbing",
+    }
+    fns = [nodes.rgb_to_yuv, nodes.rgb_to_hsl, nodes.hsl_to_yuv, nodes.scale,
+           nodes.seeded_jitter, nodes.stamp_now, nodes.jitter, nodes.read_env_scale]
+
+    right = 0
+    for fn in fns:
+        v = classify.classify(fn)
+        ok = v.identity_kind == expected[fn.__name__]
+        right += ok
+        print(v.line() + ("" if ok else "   <-- MISCLASSIFIED"))
+    print(f"\n  {right}/{len(fns)} classified correctly with a ~120-line AST walker.")
+    print("  Note `seeded_jitter`: random.Random(seed) is recognised as the")
+    print("  declared-input escape hatch, while bare random.random() is not.")
+
+
+# --- E3: the rewrite. Does it show up, and does it change the answer? ------
+
+def e3_rewrite() -> None:
+    hdr(3, "Worker rewrites RGB->HSL->YUV into a fused RGB->YUV",
+        "ADR-0010 binding is negotiation; ADR-0009 rewrite-is-perturbation")
+
+    long_hash, long_nodes = cas.build_chain([nodes.rgb_to_hsl, nodes.hsl_to_yuv])
+    fused_hash, fused_nodes = cas.build_chain([nodes.rgb_to_yuv])
+
+    print(f"  submitted graph  rgb->hsl->yuv   composed: {long_hash[:24]}")
+    print(f"  worker returned  rgb->yuv        composed: {fused_hash[:24]}")
+    print(f"  hashes differ: {long_hash != fused_hash}  <- the rewrite is visible by construction")
+
+    # Now: are the answers the same?
+    import random as _r
+    _r.seed(20260729)
+    samples = [(_r.random(), _r.random(), _r.random()) for _ in range(20000)]
+
+    worst = 0.0
+    worst_rgb = None
+    total = 0.0
+    exact = 0
+    for rgb in samples:
+        a = nodes.hsl_to_yuv(nodes.rgb_to_hsl(rgb))
+        b = nodes.rgb_to_yuv(rgb)
+        d = max(abs(x - y) for x, y in zip(a, b))
+        total += d
+        if d == 0.0:
+            exact += 1
+        if d > worst:
+            worst, worst_rgb = d, rgb
+
+    print(f"\n  n = {len(samples)} random RGB triples")
+    print(f"  bit-identical results : {exact}/{len(samples)}  ({100*exact/len(samples):.1f}%)")
+    print(f"  mean abs difference   : {total/len(samples):.3e}")
+    print(f"  worst abs difference  : {worst:.3e}   at rgb={tuple(round(v,4) for v in worst_rgb)}")
+    print(f"  worst, in ULPs of 1.0 : {worst / 2.220446049250313e-16:.1f}")
+    print("\n  => semantically supplanting, numerically NOT identical.")
+    print("     A rewrite is a perturbation. Empirical confidence measured on the")
+    print("     long graph does not transfer to the fused one for free.")
+
+
+# --- E4: does checkpointing bound an IIR node's retention window? ----------
+
+def e4_iir_retention() -> None:
+    hdr(4, "IIR retention window: checkpoint vs. no checkpoint",
+        "ADR-0013 retention envelope; ADR-0009 escape hatch")
+
+    import random as _r
+    _r.seed(1)
+    stream = [_r.random() for _ in range(4000)]
+    alpha = 0.05
+    cut = 2000
+
+    full, _ = nodes.iir_lowpass(stream, alpha)
+
+    # (a) resume WITH the checkpointed state hashed in as a declared input
+    _, state_at_cut = nodes.iir_lowpass(stream[:cut], alpha)
+    resumed_ck, _ = nodes.iir_lowpass(stream[cut:], alpha, state=state_at_cut)
+    err_ck = max(abs(x - y) for x, y in zip(resumed_ck, full[cut:]))
+
+    # (b) resume WITHOUT it — the naive "just window the input" approach
+    resumed_naive, _ = nodes.iir_lowpass(stream[cut:], alpha, state=0.0)
+    err_naive_first = abs(resumed_naive[0] - full[cut])
+    err_naive_max = max(abs(x - y) for x, y in zip(resumed_naive, full[cut:]))
+
+    print(f"  alpha = {alpha}, stream = {len(stream)} samples, cut at n = {cut}")
+    print(f"  resume WITH checkpoint    -> max error {err_ck:.3e}  (exact: {err_ck == 0.0})")
+    print(f"  resume WITHOUT checkpoint -> error at first sample {err_naive_first:.3e}")
+    print(f"                               max error over tail   {err_naive_max:.3e}")
+
+    for tol in (1e-3, 1e-6, 1e-9):
+        n = nodes.iir_error_horizon(alpha, tol)
+        print(f"  retention needed for tol {tol:.0e} without a checkpoint: {n:>5d} samples")
+
+    fir_taps = 32
+    print(f"\n  contrast: FIR({fir_taps}) needs exactly {fir_taps} samples, at any tolerance.")
+    print("\n  => checkpoint cadence IS the floor of the retention envelope for a")
+    print("     stateful node, and the required window without one is computable:")
+    print("     n = log(tol)/log(1-alpha).")
+
+
+def main() -> None:
+    print("identity-bench — pressure testing ADR-0003 / 0009 / 0010 / 0013")
+    print("throwaway spike; nothing here is the new core")
+    e1_identity()
+    e2_classification()
+    e3_rewrite()
+    e4_iir_retention()
+    print()
+
+
+if __name__ == "__main__":
+    main()

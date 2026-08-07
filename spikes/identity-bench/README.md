@@ -7,7 +7,7 @@ design assertions that had been argued but never measured.
 cd spikes/identity-bench && python3 bench.py
 ```
 
-Pure stdlib, no deps, ~600 lines. Run it before trusting any of the claims
+Pure stdlib, no deps, ~900 lines. Run it before trusting any of the claims
 below.
 
 ## What it tests, and what it found
@@ -104,12 +104,72 @@ forever.
 node**, and the cost of not checkpointing is computable rather than unbounded.
 That is a much better position than "IIR breaks eviction."
 
+### E5 — discrete-stateful substitution: when does a small difference stop being small?
+
+E3 is *stateless*: two equivalent graphs differ per-sample and it never
+accumulates. Face re-identification is the same **kind** of substitution — two
+matchers, same declared intent, semantic rather than precise replacements — but
+it is **discrete and stateful**: it assigns an observation to a track and then
+updates that track. The hypothesis was that a tiny difference would flip a
+near-threshold match and diverge permanently.
+
+**Two null results first, both informative.**
+
+1. A *uniform* perturbation `d * (1 + jitter)` never changes anything at any
+   scale — it is a monotone transform, so it preserves the ordering of
+   distances exactly and cannot flip an argmin. **An implementation difference
+   that perturbs every comparison identically is safe by construction.**
+2. Even with a per-comparison *independent* perturbation, ULP-scale jitter still
+   changed nothing — because the decisions were nowhere near close enough.
+
+So the question isn't "how big is the difference," it's "how big relative to
+the decision margins." Measured, for this workload:
+
+| | p1 | median |
+|---|---|---|
+| argmin margin (`d₂ − d₁`) | 1.13 × 10⁻³ | 1.09 × 10⁻¹ |
+| threshold gap (\|d₁ − τ\|) | 5.86 × 10⁻³ | 1.99 × 10⁻¹ |
+
+And the sweep, 300 observations of 6 people, τ = 0.45, EMA α = 0.3:
+
+| relative jitter | tracks | pairwise agreement | first divergence | re-converged | frames diverged after |
+|---|---|---|---|---|---|
+| 10⁻¹⁵ … 10⁻² | 30 | **100.000%** | never | — | — |
+| 3 × 10⁻² | 29 | 98.685% | frame 114 | yes | 81/186 (**44%**) |
+| 10⁻¹ | 30 | 95.434% | frame 22 | yes | 229/278 (**82%**) |
+
+**A sharp onset between 10⁻² and 3 × 10⁻² relative** — exactly where the
+absolute perturbation reaches the 1st-percentile decision margin. Below it,
+nothing at all. Above it, divergence that *partly* re-converges (the EMA update
+pulls the trackers back together) but leaves 44–82% of subsequent frames
+disagreeing.
+
+Three consequences:
+
+- **The three regimes are real but the middle one was mis-stated.** Stateless
+  substitution perturbs *bounded*; stable-stateful perturbs *decaying* with a
+  computable horizon (E4); discrete-stateful has a **threshold** — nothing, then
+  a sharp onset, then persistent-but-intermittent divergence. Not "permanent,"
+  which was the guess.
+- **Rounding-scale substitution is safe even here.** E3's ~10⁻¹⁶ is *fourteen
+  orders of magnitude* below the onset. The danger is not a fused kernel or a
+  different SIMD width; it is a genuinely different model, embedding, or
+  threshold — differences of 10⁻² and up.
+- **Substitutability is measurable, per deployment.** Take the margin
+  distribution of your actual workload; the low-percentile margin is the
+  tolerance you can accept. That is a computable criterion, not a judgement
+  call — and it is exactly why empirical quality has to be per-deployment: the
+  margin distribution belongs to *your* cameras, *your* population, *your*
+  workload.
+
 ## What this does *not* test
 
 Honest scope. None of the expensive parts are here:
 
 - no distribution, no network, no two machines
-- no description matching or negotiation (see E3)
+- no description matching or negotiation (see E3, E5)
+- E5 uses a synthetic embedding space, not a real re-id model — the *shape* is
+  right, the absolute margin numbers belong to this toy
 - no sync, no compaction, no eviction actually running
 - no attestation
 - single-process, single-writer, one language
@@ -119,4 +179,5 @@ Honest scope. None of the expensive parts are here:
 - `cas.py` — content-addressed node identity, node/graph hashing, merkle roll-up
 - `nodes.py` — colour conversion, perturbing nodes, IIR/FIR
 - `classify.py` — AST-based perturbation + coverage classifier
-- `bench.py` — the four experiments
+- `reid.py` — nearest-centroid tracker, decision margins, divergence profile
+- `bench.py` — the five experiments

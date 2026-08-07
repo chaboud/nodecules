@@ -157,6 +157,46 @@ def e4_iir_retention() -> None:
     print("     n = log(tol)/log(1-alpha).")
 
 
+def e5_reid_divergence() -> None:
+    hdr(5, "Discrete-stateful substitution: when does a small difference stop being small?",
+        "ADR-0009 identity classes; ADR-0010 declared-equivalent tolerance")
+
+    import reid
+
+    obs, truth = reid.make_stream(n_people=6, n_frames=300, dim=8, sigma=0.9, seed=7)
+    TAU, ALPHA = 0.45, 0.3
+    base, n_base = reid.track(obs, TAU, ALPHA, jitter=0.0)
+
+    am, tg = reid.decision_margins(obs, TAU, ALPHA)
+    am_s, tg_s = sorted(am), sorted(tg)
+    pct = lambda v, q: v[int(len(v) * q)]
+
+    print(f"  reference matcher: {n_base} tracks over {len(obs)} obs, {len(set(truth))} true people")
+    print(f"  decision margins   argmin: p1={pct(am_s,.01):.2e}  median={pct(am_s,.5):.2e}")
+    print(f"                  threshold: p1={pct(tg_s,.01):.2e}  median={pct(tg_s,.5):.2e}")
+    print("\n  A perturbation far below these margins cannot change any decision.\n")
+
+    print(f"  {'jitter':>8} {'tracks':>7} {'agree':>10} {'1st div':>8} {'reconv':>7} {'diverged after':>16}")
+    print("  " + "-" * 62)
+    for jit in (1e-15, 1e-9, 1e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1):
+        a, n = reid.track(obs, TAU, ALPHA, jitter=jit)
+        ag = reid.pairwise_agreement(base, a)
+        first, recon, after = reid.divergence_profile(base, a)
+        fd = "never" if first < 0 else str(first)
+        tail = "-" if first < 0 else f"{after}/{len(obs)-first} ({after/(len(obs)-first):.0%})"
+        print(f"  {jit:>8.0e} {n:>7} {ag:>9.3%} {fd:>8} {str(recon):>7} {tail:>16}")
+
+    print("\n  => Sharp onset between 1e-2 and 3e-2 relative, which is exactly where the")
+    print("     absolute perturbation reaches the 1st-percentile decision margin.")
+    print("     Below it: nothing. Above it: divergence that partly re-converges but")
+    print("     leaves 44-82% of subsequent frames disagreeing.")
+    print("\n     E3's rounding difference (~1e-16) is FOURTEEN orders of magnitude below")
+    print("     the onset. Rounding-scale substitution is safe even here. Model-scale")
+    print("     substitution (a different embedder, a different threshold) is not.")
+    print("     Substitutability is not about the size of the difference — it is about")
+    print("     that size RELATIVE TO THE DECISION MARGINS, which are measurable.")
+
+
 def main() -> None:
     print("identity-bench — pressure testing ADR-0003 / 0009 / 0010 / 0013")
     print("throwaway spike; nothing here is the new core")
@@ -164,6 +204,7 @@ def main() -> None:
     e2_classification()
     e3_rewrite()
     e4_iir_retention()
+    e5_reid_divergence()
     print()
 
 

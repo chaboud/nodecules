@@ -1,6 +1,6 @@
 """The bench. Run: python3 bench.py  (then: node enforce.mjs)
 
-Six experiments, each pressure-testing one design assertion. Every one prints
+Seven experiments, each pressure-testing one design assertion. Every one prints
 a PASS/FAIL/NUMBER rather than an opinion.
 """
 
@@ -220,6 +220,44 @@ def e6_wasm_manifest() -> None:
     print("  the pure module runs with {}, the perturbing one refuses to instantiate.")
 
 
+def e7_placement() -> None:
+    hdr(7, "Binding granularity: is per-ingot choice good enough?",
+        "ADR-0010 negotiation; ADR-0014 castings; boundary cost")
+
+    import placement as pl
+
+    g = pl.greedy_per_node()
+    o = pl.optimal_latency()
+    print(f"  {'plan':<28} {'latency':>9} {'crossings':>10} {'regions':>8} {'deviation':>11}")
+    print("  " + "-" * 70)
+    print(f"  {'per-ingot greedy  ' + g.shape():<28} {g.latency:>8.1f}ms {g.crossings:>10} {g.regions():>8} {g.deviation:>11.2e}")
+    print(f"  {'region-optimal    ' + o.shape():<28} {o.latency:>8.1f}ms {o.crossings:>10} {o.regions():>8} {o.deviation:>11.2e}")
+
+    print("\n  Greedy ignores edges, so its plan never changes. The penalty grows with")
+    print("  boundary cost, and the optimum collapses into fewer regions:\n")
+    print(f"  {'x crossing':>11} {'greedy':>10} {'optimal':>10} {'penalty':>10} {'opt regions':>12}")
+    for f in (0.0, 1.0, 2.0, 4.0, 8.0, 16.0):
+        cx = pl.scaled_cross(f)
+        gp, op = pl.evaluate(g.assign, cx), pl.optimal_latency(cx)
+        pen = 100 * (gp.latency - op.latency) / op.latency
+        print(f"  {f:>10.1f}x {gp.latency:>9.1f}ms {op.latency:>9.1f}ms {pen:>9.1f}% {op.regions():>12}")
+
+    front = pl.pareto(pl.all_plans())
+    print(f"\n  Pareto front over (latency, deviation): {len(front)} non-dominated plans")
+    print(f"  {'latency':>9} {'deviation':>11} {'regions':>8}  shape")
+    for p in front:
+        print(f"  {p.latency:>8.1f}ms {p.deviation:>11.2e} {p.regions():>8}  {p.shape()}")
+
+    ratio = g.deviation / o.deviation
+    print(f"\n  => Two findings. Greedy's latency penalty grows without bound as boundaries")
+    print(f"     get expensive (0% -> 561% here). And at 1x it silently spent {ratio:.0f}x more")
+    print("     of the TOLERANCE budget, picking DSP purely on speed.")
+    print("     Per-ingot ranking optimises one axis and blows another.")
+    print("     There is no single best plan — the caller's declared tolerance picks a")
+    print("     point on the front, and boundary cost sets how fine-grained")
+    print("     specialisation can usefully be.")
+
+
 def main() -> None:
     print("identity-bench — pressure testing ADR-0003 / 0009 / 0010 / 0013")
     print("throwaway spike; nothing here is the new core")
@@ -229,6 +267,7 @@ def main() -> None:
     e4_iir_retention()
     e5_reid_divergence()
     e6_wasm_manifest()
+    e7_placement()
     print()
 
 

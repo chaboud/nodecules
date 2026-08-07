@@ -198,6 +198,50 @@ Two further consequences:
 Run `python3 bench.py` for the parse, then `node enforce.mjs` for the
 enforcement.
 
+### E7 — binding granularity: is per-ingot choice good enough?
+
+Crossing a domain boundary (host↔GPU, CPU↔DSP, machine↔machine) costs latency,
+and usually costs *precision* too — f64 on the CPU, f32 on the GPU, fixed-point
+on the DSP. So picking the best casting for each ingot independently ignores the
+edges. Exhaustive over 3⁸ assignments; these are exact optima, not heuristics.
+
+| plan | latency | crossings | regions | deviation |
+|---|---|---|---|---|
+| per-ingot greedy `G-G-D-D-G-C-C-C` | 93.0 ms | 3 | 4 | 2.00e-03 |
+| region-optimal `G-G-C-C-G-C-C-C` | 86.0 ms | 3 | 4 | 3.00e-07 |
+
+**Two findings, and the second is the sharper one.**
+
+Greedy ignores edges, so its plan never changes; the penalty grows without
+bound as boundaries get expensive, and the optimum collapses into fewer regions:
+
+| × crossing cost | greedy | optimal | greedy penalty | optimal regions |
+|---|---|---|---|---|
+| 0× | 41.0 ms | 41.0 ms | 0.0% | 4 |
+| 1× | 93.0 ms | 86.0 ms | 8.1% | 4 |
+| 2× | 145.0 ms | 115.0 ms | 26.1% | 2 |
+| 4× | 249.0 ms | 132.0 ms | 88.6% | 1 |
+| 16× | 873.0 ms | 132.0 ms | **561.4%** | 1 |
+
+And at 1× — where the latency penalty is only 8% — greedy spent **6,668× more
+of the tolerance budget**, because it chose the DSP for two nodes purely on
+speed. **Per-ingot ranking optimises one axis and silently blows another.**
+
+There is no single best plan. The Pareto front over (latency, deviation):
+
+| latency | deviation | regions | shape |
+|---|---|---|---|
+| 86.0 ms | 3.0e-07 | 4 | `G-G-C-C-G-C-C-C` |
+| 104.0 ms | 2.0e-07 | 2 | `G-G-C-C-C-C-C-C` |
+| 128.0 ms | 1.0e-07 | 3 | `C-C-C-C-G-C-C-C` |
+| 146.0 ms | 0.0e+00 | 1 | `C-C-C-C-C-C-C-C` |
+
+So the worker returns a plan *from a front*, and the caller's declared
+tolerance selects the point — which is what the tolerance in a description is
+actually for. And **boundary cost sets how fine-grained specialisation can
+usefully be**: cheap boundaries (unified memory) permit 4 regions, expensive
+ones (a network hop) force 1.
+
 ## What this does *not* test
 
 Honest scope. None of the expensive parts are here:
@@ -211,6 +255,8 @@ Honest scope. None of the expensive parts are here:
 - single-process, single-writer
 - E6 uses hand-assembled toy modules; no real ingot has been compiled from a
   real language, and no casting has been measured against one
+- E7's costs are invented. The *shape* of the result is robust; the specific
+  percentages belong to the toy
 
 ## Files
 
@@ -218,6 +264,7 @@ Honest scope. None of the expensive parts are here:
 - `nodes.py` — colour conversion, perturbing nodes, IIR/FIR
 - `classify.py` — AST-based perturbation + coverage classifier
 - `reid.py` — nearest-centroid tracker, decision margins, divergence profile
+- `placement.py` — domain placement, boundary costs, Pareto front
 - `wasm_ingot.py` — hand-assembled WASM modules, import-section parser, module hash
 - `enforce.mjs` — V8 check that the import manifest is enforced, not advisory
-- `bench.py` — the six experiments
+- `bench.py` — the seven experiments

@@ -1,6 +1,6 @@
-"""The bench. Run: python3 bench.py
+"""The bench. Run: python3 bench.py  (then: node enforce.mjs)
 
-Four experiments, each pressure-testing one design assertion. Every one prints
+Six experiments, each pressure-testing one design assertion. Every one prints
 a PASS/FAIL/NUMBER rather than an opinion.
 """
 
@@ -197,6 +197,29 @@ def e5_reid_divergence() -> None:
     print("     that size RELATIVE TO THE DECISION MARGINS, which are measurable.")
 
 
+def e6_wasm_manifest() -> None:
+    hdr(6, "A portable unit of compute: is the WASM import section a *proof* of coverage?",
+        "ADR-0003 identity; ADR-0009 determinism-vs-coverage; P-25 manifest")
+
+    import wasm_ingot as w
+
+    pure, pert = w.pure_module(), w.perturbing_module()
+    for label, mod in (("pure", pure), ("perturbing", pert)):
+        imps = w.read_imports(mod)
+        manifest = ", ".join(str(i) for i in imps) if imps else "NONE"
+        print(f"  {label:<11} {len(mod):>3} bytes  hash {w.module_hash(mod)[:16]}")
+        print(f"  {'':<11} coverage manifest = imports: {manifest}")
+
+    print("\n  Identity: the bytes are already canonical, so E1's source-vs-AST")
+    print("  dilemma does not arise at this layer at all — and it is language-agnostic.")
+    print("\n  Coverage: E2's AST walker was a best-effort scanner that could miss an")
+    print("  unknown-unknown. A WASM module has NO ambient authority — no clock, RNG,")
+    print("  env, filesystem or network — unless the host hands it an import. So the")
+    print("  import section is a COMPLETE declaration of everything reachable outside")
+    print("  its own bytes. Run `node enforce.mjs` to see the sandbox enforce it:")
+    print("  the pure module runs with {}, the perturbing one refuses to instantiate.")
+
+
 def main() -> None:
     print("identity-bench — pressure testing ADR-0003 / 0009 / 0010 / 0013")
     print("throwaway spike; nothing here is the new core")
@@ -205,6 +228,7 @@ def main() -> None:
     e3_rewrite()
     e4_iir_retention()
     e5_reid_divergence()
+    e6_wasm_manifest()
     print()
 
 

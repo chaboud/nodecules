@@ -204,3 +204,5 @@ local_settings.py
 
 # Docker volumes
 postgres_data/
+# identity-bench scratch
+spikes/identity-bench/_*.wasm

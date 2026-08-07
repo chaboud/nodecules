@@ -1,7 +1,7 @@
 # identity-bench
 
-A throwaway spike, not the new core. It exists to put numbers against four
-design assertions that had been argued but never measured.
+A throwaway spike, not the new core. It exists to put numbers against design
+assertions that had been argued but never measured.
 
 ```bash
 cd spikes/identity-bench && python3 bench.py
@@ -162,6 +162,42 @@ Three consequences:
   margin distribution belongs to *your* cameras, *your* population, *your*
   workload.
 
+### E6 — a portable unit of compute: is the WASM import section a *proof*?
+
+E2's AST walker was best-effort — it found the perturbing calls it knew about,
+and could always miss an unknown-unknown. A WASM module cannot have one. It has
+**no ambient authority at all** — no clock, RNG, environment, filesystem or
+network — unless the host hands it an import. So the import section is a
+*complete* declaration of everything reachable outside its own bytes.
+
+Two hand-assembled modules (no toolchain required), parsed and then run in V8:
+
+| module | bytes | coverage manifest | instantiates with `{}` |
+|---|---|---|---|
+| pure `add(i32,i32)` | 41 | **NONE** | yes — `add(17,25) = 42` |
+| `stamp()` importing `env.now` | 51 | `env.now (func)` | **no — refuses** |
+
+```
+TypeError: WebAssembly.Instance(): Import #0 module="env": module is not an object or function
+```
+
+**The manifest is a hard precondition, not documentation.** "Provably pure"
+stops meaning "no perturbing calls found" and starts meaning "cannot reach one."
+
+Two further consequences:
+
+- **E1's dilemma dissolves at this layer.** The bytes are already canonical, so
+  there is no source-vs-AST question — and identity stops being a
+  Python-specific answer.
+- **The reference implementation is the conformance oracle.** Every unit of
+  compute ships one, so "are these two interchangeable?" becomes measurable by
+  anyone on their own data: run the reference on sampled inputs, compute the
+  accelerated version's deviation, and accept it iff the deviation is far below
+  the E5 decision margins.
+
+Run `python3 bench.py` for the parse, then `node enforce.mjs` for the
+enforcement.
+
 ## What this does *not* test
 
 Honest scope. None of the expensive parts are here:
@@ -172,7 +208,9 @@ Honest scope. None of the expensive parts are here:
   right, the absolute margin numbers belong to this toy
 - no sync, no compaction, no eviction actually running
 - no attestation
-- single-process, single-writer, one language
+- single-process, single-writer
+- E6 uses hand-assembled toy modules; no real ingot has been compiled from a
+  real language, and no casting has been measured against one
 
 ## Files
 
@@ -180,4 +218,6 @@ Honest scope. None of the expensive parts are here:
 - `nodes.py` — colour conversion, perturbing nodes, IIR/FIR
 - `classify.py` — AST-based perturbation + coverage classifier
 - `reid.py` — nearest-centroid tracker, decision margins, divergence profile
-- `bench.py` — the five experiments
+- `wasm_ingot.py` — hand-assembled WASM modules, import-section parser, module hash
+- `enforce.mjs` — V8 check that the import manifest is enforced, not advisory
+- `bench.py` — the six experiments

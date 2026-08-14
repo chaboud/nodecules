@@ -12,6 +12,7 @@ from .api.instances import router as instances_router
 from .core.executor import NodeRegistry
 from .plugins.loader import PluginManager
 from .plugins.builtin_nodes import BUILTIN_NODES
+from .plugins.service_nodes import load_service_nodes
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -39,11 +40,16 @@ async def lifespan(app: FastAPI):
     plugin_manager = PluginManager(plugin_dirs)
     plugin_manager.initialize()
     
-    # Initialize node registry with built-in nodes
+    # Initialize node registry with stateless built-in nodes.
     node_registry = NodeRegistry()
     for node_type, node_class in BUILTIN_NODES.items():
         node_registry.register(node_type, node_class)
-        
+
+    # Service-backed chat/context/graph nodes — require Postgres + Redis,
+    # registered here at FastAPI startup rather than at library import.
+    for node_type, node_class in load_service_nodes().items():
+        node_registry.register(node_type, node_class)
+
     # Add plugin nodes to registry
     plugin_nodes = plugin_manager.get_node_registry()
     for node_type, node_class in plugin_nodes.items():

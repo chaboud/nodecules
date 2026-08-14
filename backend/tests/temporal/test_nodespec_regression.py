@@ -121,61 +121,62 @@ class TestChunkedContextIsExecutionContext:
         assert ctx.time_source is not None
 
 
-class TestBuiltinNodesPatternStillConstructs:
-    """Regression guard using the exact construction pattern every builtin follows.
+class TestBuiltinNodesStillLoad:
+    """Regression guard importing the REAL builtin nodes.
 
-    We deliberately do NOT `from nodecules.plugins.builtin_nodes import ...`
-    here because that module transitively imports the chat-context subsystem
-    (`smart_context.py`, `content_addressable_context.py`) which pulls redis
-    and postgres at import time. That's pre-existing tech debt against the
-    `core/` layering invariant (see CLAUDE.md #4) and is scheduled for
-    quarantine in a separate PR. The unit-test discipline says this test
-    should check the dataclass defaults, not the chat stack.
+    `builtin_nodes.py` imports only `core.types` — it does NOT pull the
+    chat-context subsystem (that is `immutable_chat_node.py` and
+    `smart_chat_node.py`, which stay excluded here). An earlier revision of
+    this guard asserted against a hand-copied `InputNode.__init__` on the
+    mistaken belief that importing the module dragged in redis/postgres;
+    a hand-copy cannot notice when a builtin's real spec changes, which is
+    exactly the regression this guard exists to catch.
     """
 
-    def test_input_node_style_construction(self) -> None:
-        """Mirrors `InputNode.__init__` exactly."""
-        from nodecules.core.types import (
-            DataType,
-            ParameterSpec,
-            PortSpec,
-            ResourceRequirement,
+    def test_all_builtins_instantiate_with_static_defaults(self) -> None:
+        from nodecules.plugins.builtin_nodes import (
+            InputNode,
+            JsonCollectNode,
+            JsonExtractNode,
+            JsonReplaceNode,
+            OutputNode,
+            TextConcatNode,
+            TextFilterNode,
+            TextTransformNode,
         )
 
-        spec = NodeSpec(
-            node_type="input",
-            display_name="Input",
-            description="Provides input data to the graph",
-            category="Input/Output",
-            inputs=[],
-            outputs=[
-                PortSpec(name="output", data_type=DataType.ANY, description="Input data")
-            ],
-            parameters=[
-                ParameterSpec(name="label", data_type="string", default=""),
-                ParameterSpec(name="value", data_type="string", default=""),
-                ParameterSpec(name="data_type", data_type="string", default="text"),
-            ],
-            resource_requirements=ResourceRequirement(),
-        )
-        assert spec.temporal_kind == "static"
-        assert spec.emit_policy == "on_window_close"
-        assert spec.supports_reanneal is False
-        assert spec.window_spec is None
+        for cls in (
+            InputNode,
+            TextTransformNode,
+            TextFilterNode,
+            TextConcatNode,
+            JsonExtractNode,
+            JsonReplaceNode,
+            JsonCollectNode,
+            OutputNode,
+        ):
+            spec = cls().spec
+            assert spec.temporal_kind == "static", cls.__name__
+            assert spec.emit_policy == "on_window_close", cls.__name__
+            assert spec.supports_reanneal is False, cls.__name__
+            assert spec.window_spec is None, cls.__name__
 
-    def test_text_transform_style_construction(self) -> None:
-        """Mirrors `TextTransformNode.__init__` exactly."""
-        from nodecules.core.types import DataType, ParameterSpec, PortSpec
+    def test_input_node_real_spec_shape(self) -> None:
+        """Pin the observable interface of the real InputNode, not a copy."""
+        from nodecules.plugins.builtin_nodes import InputNode
 
-        spec = NodeSpec(
-            node_type="text_transform",
-            display_name="Text Transform",
-            description="Transforms text using various operations",
-            category="Text",
-            inputs=[PortSpec(name="input", data_type=DataType.TEXT)],
-            outputs=[PortSpec(name="output", data_type=DataType.TEXT)],
-            parameters=[
-                ParameterSpec(name="operation", data_type="string", default="uppercase"),
-            ],
-        )
-        assert spec.temporal_kind == "static"
+        spec = InputNode().spec
+        assert spec.node_type == "input"
+        assert [p.name for p in spec.outputs] == ["output"]
+        assert [p.name for p in spec.parameters] == ["label", "value", "data_type"]
+
+    def test_text_transform_real_spec_shape(self) -> None:
+        from nodecules.plugins.builtin_nodes import TextTransformNode
+
+        spec = TextTransformNode().spec
+        assert spec.node_type == "text_transform"
+        # The real input port is named "text" — the previous hand-copied guard
+        # asserted "input" and stayed green, which is the drift this rewrite
+        # exists to catch.
+        assert [p.name for p in spec.inputs] == ["text"]
+        assert [p.name for p in spec.outputs] == ["output"]

@@ -1,4 +1,10 @@
-# REFERENCE-MODEL.md — declarative generation DAG over a COW node store
+# REFERENCE-MODEL.md — nodecules v2: declarative generation DAG over a COW node store
+
+**Naming (2026-08-25, vault ADR-0020):** the system this document specifies
+is **nodecules v2** — "nodecules" unqualified means this substrate; the
+original engine on `main` is "the legacy engine". This file is the nodecules
+v2 reference model; the working title "REFERENCE-MODEL" survives only as a
+filename.
 
 **Status:** Part I (the model) is design-only. Part II is design with
 two pieces now shipped as code: **PR-r1** (`a40772c`) — the typed

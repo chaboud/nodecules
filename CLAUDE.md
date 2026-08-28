@@ -19,6 +19,16 @@ The decision is: *nodecules is the vehicle; the codebase is new.* Same repo,
 same name, same relationship to stenota — a fresh spine underneath. Nothing on
 `main` is load-bearing for that work.
 
+**Naming (vault ADR-0020, 2026-08-25):** the substrate *is* nodecules — the
+system name, not just the repo name. Convention: **"nodecules" unqualified
+means v2** (the substrate specified in `REFERENCE-MODEL.md`); the original
+engine on `main` is always called **the legacy engine**, qualified. Don't
+introduce new placeholder names ("the primitive", "the substrate" as a proper
+noun). New mechanism names may draw on the chemistry family (valence = a
+kind's reference constraints, bond = typed edge, isomer = equivalent graph
+realization, polymer/monomer = strip/cell) alongside the committed metallurgy
+terms (ingot, casting, anneal, assay, hallmark).
+
 ## Branch map — read this first
 
 | branch | what it is | who works it |
@@ -29,8 +39,9 @@ same name, same relationship to stenota — a fresh spine underneath. Nothing on
 | `claude/llm-wiki-distributed-compute-ii9ijq` | **the integration branch.** Contains everything above plus `spikes/` (design benches) and this file. | cloud instance |
 
 Design authority lives in the **ChaboudPrivateWiki** vault
-(`LLM_Wiki/decisions/`, ADRs 0002–0017). If you have the vault, read
-`LLM_Wiki/primitive/index.md` first. The compressed load-bearing decisions are
+(`LLM_Wiki/decisions/`, ADRs 0002–0020; 0018 one-node-model blessed with
+residency conditions, 0019 escrow execution, 0020 naming). If you have the
+vault, read `LLM_Wiki/primitive/index.md` first. The compressed load-bearing decisions are
 at the bottom of this file for instances that don't.
 
 ## Repo at a glance

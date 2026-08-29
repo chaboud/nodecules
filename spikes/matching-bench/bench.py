@@ -1,8 +1,10 @@
 """The matching bench. Run: python3 bench.py
 
-Six experiments against P-27's three unmeasured things — the matching, the
-decision, and the equivalence argument. Every one prints a measurement or a
-PASS/FAIL rather than an opinion.
+Eight experiments. M1-M6 measure P-27's three unmeasured things — the
+matching, the decision, and the equivalence argument. M7-M8 measure P-32's
+adversarial half: whether the assay can be gamed, and what workload-drawn
+probing buys back. Every one prints a measurement or a PASS/FAIL rather
+than an opinion.
 """
 
 from __future__ import annotations
@@ -164,6 +166,97 @@ def m6_verify(honest_receipt: match.Receipt) -> None:
     print("     outcome is derivable, and the deviation claim is re-measurable.")
 
 
+# --- M7: the defeat device — every mechanical check passes ------------------
+
+def m7_defeat_device() -> None:
+    hdr(7, "Defeat device: honest on the public suite, wrong in production",
+        "P-32 Goodhart; ADR-0021 'certificate over a declared subset'")
+
+    import gamed
+
+    desc = d.describe(tolerance=1e-12)
+    public_suite = SAMPLES  # the description's published conformance inputs
+    device = gamed.make_defeat_device(frozenset(public_suite))
+    r_device = d.Realization(device, "color.rgb", "color.yuv")
+
+    ref_out = [match.run_plan(desc.reference, s) for s in public_suite]
+    a = match.assay((r_device,), ref_out, public_suite)
+    print(f"  assay on the PUBLIC suite (n={len(public_suite)}):"
+          f"  worst dev {a.worst:.3e}  -> {'PASS' if a.worst <= desc.tolerance else 'REJECT'}")
+
+    receipt = match.Receipt(
+        plan_names=(r_device.name,), graph_hash=a.graph_hash,
+        reference_hash=d.plan_hash(desc.reference),
+        outcome=match.OUTCOME_SUBSTITUTE, worst_deviation=a.worst,
+        tolerance=desc.tolerance, n_samples=len(public_suite),
+    )
+    ok, why = match.verify(receipt, (r_device,), desc, public_suite)
+    print(f"  hallmark check, SAME suite     : {'PASS' if ok else 'FAIL'} — {why}")
+
+    production = sample_rgb(20000, 424242)  # inputs the device never saw
+    prod = match.assay((r_device,), [match.run_plan(desc.reference, s) for s in production], production)
+    print(f"  production (fresh inputs)      : worst dev {prod.worst:.3e}")
+
+    print("\n  => every mechanical check passed and production is wrong by"
+          f" {prod.worst:.0e}.")
+    print("     The receipt is honest; the CLAIM it certifies is too weak. The")
+    print("     deception lives entirely in the gap between suite and workload,")
+    print("     so probe provenance (which inputs, drawn from where) must be a")
+    print("     first-class receipt field — 'passed the public suite' is")
+    print("     Goodhart-void as evidence.")
+
+
+# --- M8: workload-sampled probing — detection scales with harm --------------
+
+def m8_detection_scaling() -> None:
+    hdr(8, "Workload-sampled probes: detection probability equals harm rate",
+        "P-32 resolution criterion — 'at what sampling rate'")
+
+    import gamed
+    import random as _r
+
+    desc = d.describe(tolerance=1e-12)
+    public_suite = frozenset(SAMPLES)
+    fractions = (0.1, 0.01, 0.001)
+    ns = (1, 3, 10, 30, 100, 300, 1000)
+    trials = 100
+
+    print(f"  sparse defector: honest on the public suite, defects on a fraction f")
+    print(f"  of the input space. {trials} trials per cell; detection = any fresh")
+    print(f"  probe deviating past tolerance.\n")
+    print("  " + " ".join(f"{'f=' + str(f):>9s}" for f in fractions) + "    n (fresh probes)")
+
+    rng = _r.Random(77)
+    need95: dict[float, int | None] = {f: None for f in fractions}
+    for n in ns:
+        row = []
+        for f in fractions:
+            device = gamed.make_sparse_defector(public_suite, f)
+            detected = 0
+            for _ in range(trials):
+                probes = [(rng.random(), rng.random(), rng.random()) for _ in range(n)]
+                for p in probes:
+                    got = device(p)
+                    want = d.nodes.rgb_to_yuv(p)
+                    if max(abs(x - y) for x, y in zip(got, want)) > desc.tolerance:
+                        detected += 1
+                        break
+            rate = detected / trials
+            if rate >= 0.95 and need95[f] is None:
+                need95[f] = n
+            row.append(f"{rate:9.2f}")
+        print("  " + " ".join(row) + f"    {n}")
+
+    print(f"\n  expected: P(detect) = 1-(1-f)^n; 95% needs n ≈ 3/f "
+          f"(measured 95% at n = {[need95[f] for f in fractions]} for f = {list(fractions)})")
+    print("\n  => when probes are drawn from the workload distribution, per-probe")
+    print("     detection probability IS the per-input harm rate: a gamer can only")
+    print("     hide defections where the workload does not go — which is where")
+    print("     they do not matter. The budget to exclude defection rate f is")
+    print("     ~3/f fresh samples, so rare-defection assurance is bought over")
+    print("     time by production spot-checks (P-29), not at binding.")
+
+
 if __name__ == "__main__":
     m1_structural()
     m2_assay()
@@ -171,4 +264,6 @@ if __name__ == "__main__":
     m4_tolerance_forbids()
     m5_composition()
     m6_verify(receipt)
+    m7_defeat_device()
+    m8_detection_scaling()
     print()

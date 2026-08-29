@@ -48,14 +48,16 @@ together). Runs in about a second:
 
 ```bash
 cd spikes/matching-bench
-python3 bench.py      # six experiments, M1-M6
+python3 bench.py      # eight experiments, M1-M8
 ```
 
-P-27's prescribed bench: a worker is handed only a description
-(`color.rgb` in, `color.yuv` out, tolerance t) plus its own realization
-inventory, and has to produce a graph — the matching, the decision, and the
-equivalence argument that the identity bench left unmeasured. Six
-experiments and what they found — full detail in its own `README.md`:
+P-27's prescribed bench, extended with P-32's adversarial half: a worker is
+handed only a description (`color.rgb` in, `color.yuv` out, tolerance t)
+plus its own realization inventory, and has to produce a graph — the
+matching, the decision, and the equivalence argument that the identity
+bench left unmeasured — then the assay is attacked with realizations tuned
+to pass it. Eight experiments and what they found — full detail in its own
+`README.md`:
 
 | | question | finding |
 |---|---|---|
@@ -65,9 +67,14 @@ experiments and what they found — full detail in its own `README.md`:
 | M4 | what if tolerance forbids it? | falls back to the reference realization; receipt says `exact` |
 | M5 | produce a *graph*, not pick a node? | composes the two-step chain by interface chaining; with no path, **no binding** — the query fails ordinarily |
 | M6 | is the receipt independently checkable? | forged outcome and swapped plan both mechanically caught |
+| M7 | can the assay be gamed? | a **defeat device** (honest on the published suite, wrong off it) passes every mechanical check — the deception lives entirely in the probe-set gap |
+| M8 | what does workload sampling buy? | per-probe detection probability **equals** the per-input harm rate; measured detection tracks 1−(1−f)ⁿ; 95% assurance ≈ 3/f fresh probes |
 
 The unplanned finding: the impostor was also the *cheapest* structurally-valid
 plan, so a matcher without the assay would preferentially select the wrong
 answer — cost pressure actively drives toward impostors. The satisfies
 judgment is **two judgments** (a structural valence check and an empirical
-assay), mirroring ADR-0003's two identity layers.
+assay), mirroring ADR-0003's two identity layers. The Goodhart pair (M7-M8)
+adds the receipt consequence: probe provenance — which inputs, drawn from
+where — is a first-class receipt field, because "passed the published
+suite" is void as evidence against a realization tuned to the suite.

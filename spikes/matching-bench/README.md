@@ -6,7 +6,7 @@ second:
 
 ```bash
 cd spikes/matching-bench
-python3 bench.py
+python3 bench.py      # eight experiments, M1-M8
 ```
 
 ## What it tests
@@ -56,6 +56,8 @@ ADR-0003 already unpicked.
 | M4 | what happens when tolerance forbids it? | at 1e-17 the fused path fails the assay; worker falls back to the reference, receipt says `exact` |
 | M5 | can it produce a *graph*, not pick a node? | with no direct realization it composes the two-step chain by interface chaining; with no path at all it returns **no binding** — the query fails ordinarily (E_NOINTERFACE) |
 | M6 | is the receipt independently checkable? | verifier re-runs on its own samples: honest receipt passes; forged outcome caught by hash-derivability; swapped plan caught by hash mismatch |
+| M7 | can the assay be gamed? (P-32) | a **defeat device** (honest on the published suite, BT.709 off it) passes the assay, passes the hallmark check against the same suite, and is wrong by 1.2e-1 in production — **every mechanical check passes; the deception lives entirely in the probe-set gap** |
+| M8 | what does workload sampling buy? | for a defector on fraction *f* of the input space, per-probe detection probability **is** *f* — measured detection tracks 1−(1−f)ⁿ across f ∈ {0.1, 0.01, 0.001}; 95% assurance costs n ≈ 3/f fresh probes |
 
 **The unplanned finding:** the impostor is also the *cheapest*
 structurally-valid plan (6.2ms vs the casting's 9.9ms per 20k samples — one
@@ -71,11 +73,32 @@ outcome in M6 mechanically catchable. A receipt field that cannot be
 recomputed from content is a field a verifier must take on faith — worth
 keeping as a design rule when the hallmark grows a signature.
 
+**The Goodhart findings (M7–M8, P-32):** the defeat device shows that a
+receipt can be perfectly honest while the claim it certifies is too weak —
+"passed the published suite" is void as evidence, because that is exactly
+the subset a gamer optimizes for. So **probe provenance is a first-class
+receipt field**: a verifier must be able to tell fixed-suite probes from
+fresh workload-drawn ones. And M8 puts a number on what fresh sampling
+buys: when probes come from the live workload distribution, the per-probe
+detection probability *equals* the per-input harm rate — a gamer can hide
+defections only in inputs the workload doesn't visit, which are the inputs
+where defection doesn't matter. Assurance against defection rate f costs
+~3/f fresh probes, so rare-defection assurance accumulates over production
+spot-checks (the P-29 exercise discipline) rather than being bought at
+binding time.
+
 ## Honest scope
 
 - Synthetic, single process, deterministic nodes only. The `equivalent`
   regime (nondeterministic recipes, where checking degrades from empirical
   to reputational — ADR-0019's own caveat) is **not exercised** here.
+- The M8 defector defects *uniformly* over the input space, so
+  workload-drawn probes and harm see the same distribution by construction.
+  A smarter adversary defects on inputs the workload visits rarely but
+  values highly (tail inputs with fat decision margins at stake); against
+  that shape, uniform-rate arithmetic understates the required sampling,
+  and importance-weighting probes by margin (P-28's distribution, once it
+  exists as a strip) is the obvious counter — designed, not measured.
 - `tolerance` is a scalar. The real criterion is margin-relative
   (E5, P-28): the margin distribution is per-workload and drifts. A scalar
   is the right first cut and the wrong last one.
@@ -89,6 +112,6 @@ keeping as a design rule when the hallmark grows a signature.
   P-29), not this bench.
 - No signature. The receipt is the hallmark's payload, not a hallmark.
 
-P-references (P-11, P-27, P-28) are the vault's open-questions list
-(ChaboudPrivateWiki `LLM_Wiki/primitive/open-questions.md`); ADRs are its
-`LLM_Wiki/decisions/`.
+P-references (P-11, P-27, P-28, P-29, P-32) are the vault's open-questions
+list (ChaboudPrivateWiki `LLM_Wiki/primitive/open-questions.md`); ADRs are
+its `LLM_Wiki/decisions/`.

@@ -40,3 +40,34 @@ which is the point of building them.
 **Honest scope:** single process, single writer, no network, no real ingot
 compiled from a real language, and E5/E7's absolute numbers belong to synthetic
 models. The *shapes* are robust; don't quote the percentages.
+
+## `matching-bench/`
+
+Pure stdlib; shares the toy colour chain with `identity-bench` (they retire
+together). Runs in about a second:
+
+```bash
+cd spikes/matching-bench
+python3 bench.py      # six experiments, M1-M6
+```
+
+P-27's prescribed bench: a worker is handed only a description
+(`color.rgb` in, `color.yuv` out, tolerance t) plus its own realization
+inventory, and has to produce a graph — the matching, the decision, and the
+equivalence argument that the identity bench left unmeasured. Six
+experiments and what they found — full detail in its own `README.md`:
+
+| | question | finding |
+|---|---|---|
+| M1 | does interface search find the candidates? | yes, including an **impostor** (BT.709 constants) structurally indistinguishable from the honest casting |
+| M2 | can the assay tell them apart? | casting 5.6e-16 worst deviation, impostor 1.2e-1 — caught **only by running it** |
+| M3 | does the worker find the fused path? | yes; cheapest passing plan, receipt says `via-substitute` with a different hash |
+| M4 | what if tolerance forbids it? | falls back to the reference realization; receipt says `exact` |
+| M5 | produce a *graph*, not pick a node? | composes the two-step chain by interface chaining; with no path, **no binding** — the query fails ordinarily |
+| M6 | is the receipt independently checkable? | forged outcome and swapped plan both mechanically caught |
+
+The unplanned finding: the impostor was also the *cheapest* structurally-valid
+plan, so a matcher without the assay would preferentially select the wrong
+answer — cost pressure actively drives toward impostors. The satisfies
+judgment is **two judgments** (a structural valence check and an empirical
+assay), mirroring ADR-0003's two identity layers.

@@ -35,14 +35,22 @@ terms (ingot, casting, anneal, assay, hallmark).
 |---|---|---|
 | `main` | the original engine. Working, unstable, partly aspirational docs. | leave alone unless fixing `main` |
 | `feat/temporality` | temporal primitives for stenota: `TimeRange`, `TimeSource`, `ChunkedContext`, `TemporalScheduler`, node cache, annotations. Contains `main`. Fast-forwarded to track the substrate work below. | stenota-driven work |
-| `claude/recon-nodecules-t9Dqq` | **the live substrate work.** `REFERENCE-MODEL.md` (declarative generation DAG over a COW node store) plus shipped code: strips, typed access patterns (PR-r1), the resolver (PR-r2), subscriptions, environment, tool-aware providers, cycle validator — 279 tests, no DB required. Descends from `feat/temporality`. | laptop instance |
-| `claude/llm-wiki-distributed-compute-ii9ijq` | **the integration branch.** Contains everything above plus `spikes/` (design benches) and this file. | cloud instance |
+| `claude/recon-nodecules-t9Dqq` | the laptop's substrate line: `REFERENCE-MODEL.md` (declarative generation DAG over a COW node store) plus shipped code: strips, typed access patterns (PR-r1), the resolver (PR-r2), subscriptions, environment, tool-aware providers, cycle validator — 279 tests, no DB required. Descends from `feat/temporality`. | laptop instance |
+| `claude/nodecules-v2-naming-matching-vmkexv` | **the live cloud-side line.** Everything above plus `spikes/` (identity-bench E1–E7, matching-bench M1–M8) and this file. Supersedes `claude/llm-wiki-distributed-compute-ii9ijq`, which it contains. | cloud instance |
+
+Cloud session branches get renamed by the harness between sessions, and a
+handoff has twice deleted the old remote branch and re-seeded the new name
+from `main` — **if a "cloud" branch looks like bare `main`, look for the
+newest `claude/*` branch containing the spikes before assuming work is
+lost** (recovery precedent: vault unification plan, 2026-08-29).
 
 Design authority lives in the **ChaboudPrivateWiki** vault
-(`LLM_Wiki/decisions/`, ADRs 0002–0020; 0018 one-node-model blessed with
-residency conditions, 0019 escrow execution, 0020 naming). If you have the
-vault, read `LLM_Wiki/primitive/index.md` first. The compressed load-bearing decisions are
-at the bottom of this file for instances that don't.
+(`LLM_Wiki/decisions/`, ADRs 0002–0022; 0018 one-node-model blessed with
+residency conditions, 0019 escrow execution, 0020 naming, 0021 the
+satisfies judgment, 0022 reputation-is-layered). If you have the vault,
+read `LLM_Wiki/state-of-play.md` first, then `LLM_Wiki/primitive/index.md`.
+The compressed load-bearing decisions are at the bottom of this file for
+instances that don't.
 
 ## Repo at a glance
 
@@ -118,3 +126,5 @@ For instances without the vault. Full ADRs: ChaboudPrivateWiki
 - **Binding granularity is a region, not a node.** Crossing a domain boundary costs latency *and* precision; per-node choice optimises one axis and silently blows the other.
 - **The portable unit of compute is an *ingot*** — a WASM reference realization, superseded by hardware-specific *castings*. A WASM module's import section is a sandbox-enforced proof of everything it can reach, and the ingot doubles as the conformance oracle for its castings.
 - **Retention envelope ≠ fetch envelope.** What must still exist is not what a given consumer reads now; many fetch envelopes, one retention envelope. Checkpoint cadence is the floor of the retention envelope for stateful nodes.
+- **The satisfies judgment is two judgments** (ADR-0021, measured in `spikes/matching-bench/`): a structural *valence check* over kinds plus an empirical *assay* against the reference realization a description ships with. The assay certifies a probed subset, never a universal claim — so probe provenance is a first-class receipt field, and probes drawn fresh from the live workload detect defection at exactly the harm rate (~3/f probes exclude defection above rate f). An *audition* is the same assay run consumer-side, with the auditioner's own known-output jobs.
+- **Reputation is layered, never kernel** (ADR-0022): the substrate ships facts — identity, hallmarks, re-runnable assays, registries — and reputation mechanics are derived kinds folding over them. A vouch is a label: it cites a hash, nothing reachable from that hash cites it back, enforced as a valence constraint. No trust-score field in the node envelope, ever.

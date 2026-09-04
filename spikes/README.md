@@ -87,7 +87,7 @@ DGX-class LAN runner, the cloud. Runs in a fifth of a second:
 
 ```bash
 cd spikes/placement-bench
-python3 bench.py      # six experiments, P1-P6
+python3 bench.py      # eight experiments, P1-P8
 ```
 
 | | question | finding |

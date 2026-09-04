@@ -1,0 +1,90 @@
+{
+  "graph_id": "stenota.v0",
+  "name": "stenota",
+  "nodes": {
+    "decode": {
+      "node_type": "stenota.decode_pyav"
+    },
+    "asr": {
+      "node_type": "stenota.asr_faster_whisper"
+    },
+    "diar": {
+      "node_type": "stenota.diar_pyannote"
+    },
+    "turns": {
+      "node_type": "stenota.turns_l2"
+    },
+    "name_inference": {
+      "node_type": "stenota.llm_tool_loop",
+      "parameters": {
+        "system_prompt": "@prompts/name_inference.md",
+        "model": "gemma4:e4b",
+        "tools": [
+          "list_speakers",
+          "turns_by_speaker",
+          "search_text",
+          "meeting_overview",
+          "propose_speaker_name"
+        ],
+        "include_write_tools": true,
+        "output_mode": "skip",
+        "max_iterations": 20,
+        "temperature": 0.1,
+        "min_confidence": 0.6
+      }
+    },
+    "speaker_relabel": {
+      "node_type": "stenota.speaker_relabel"
+    },
+    "participation": {
+      "node_type": "stenota.participation"
+    },
+    "summarizer_l2": {
+      "node_type": "stenota.summarizer_l2"
+    },
+    "render": {
+      "node_type": "stenota.render_markdown"
+    },
+    "lens_exec_summary": {
+      "node_type": "stenota.llm_tool_loop",
+      "parameters": {
+        "system_prompt": "@prompts/exec_summary.md",
+        "model": "gemma4:e4b",
+        "tools": "*",
+        "output_path": "insights/executive_summary.md",
+        "output_mode": "overwrite",
+        "max_iterations": 8,
+        "temperature": 0.15
+      }
+    },
+    "lens_hot_takes": {
+      "node_type": "stenota.llm_tool_loop",
+      "parameters": {
+        "system_prompt": "@prompts/hot_takes.md",
+        "model": "gemma4:e4b",
+        "tools": "*",
+        "output_path": "insights/hot_takes.md",
+        "output_mode": "overwrite",
+        "max_iterations": 12,
+        "temperature": 0.2
+      }
+    }
+  },
+  "edges": [
+    { "source": "decode",          "source_port": "duration_ms",         "target": "asr",             "target_port": "duration_ms" },
+    { "source": "decode",          "source_port": "duration_ms",         "target": "diar",            "target_port": "duration_ms" },
+    { "source": "asr",             "source_port": "segment_count",       "target": "turns",           "target_port": "asr_segment_count" },
+    { "source": "diar",            "source_port": "speaker_count",       "target": "turns",           "target_port": "diar_speaker_count" },
+    { "source": "turns",           "source_port": "turn_count",          "target": "name_inference",  "target_port": "ready" },
+    { "source": "diar",            "source_port": "speaker_count",       "target": "speaker_relabel", "target_port": "diar_speaker_count" },
+    { "source": "name_inference",  "source_port": "iterations",          "target": "speaker_relabel", "target_port": "ready_2" },
+    { "source": "speaker_relabel", "source_port": "global_speaker_count", "target": "participation",   "target_port": "global_speaker_count" },
+    { "source": "asr",             "source_port": "segment_count",       "target": "participation",   "target_port": "asr_segment_count" },
+    { "source": "turns",           "source_port": "turn_count",          "target": "summarizer_l2",   "target_port": "turn_count" },
+    { "source": "summarizer_l2",   "source_port": "claims",              "target": "render",          "target_port": "claims" },
+    { "source": "participation",   "source_port": "speaker_count",       "target": "lens_exec_summary", "target_port": "ready" },
+    { "source": "render",          "source_port": "render_path",         "target": "lens_exec_summary", "target_port": "ready_2" },
+    { "source": "participation",   "source_port": "speaker_count",       "target": "lens_hot_takes",  "target_port": "ready" },
+    { "source": "render",          "source_port": "render_path",         "target": "lens_hot_takes",  "target_port": "ready_2" }
+  ]
+}

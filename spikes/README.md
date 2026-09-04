@@ -78,3 +78,27 @@ assay), mirroring ADR-0003's two identity layers. The Goodhart pair (M7-M8)
 adds the receipt consequence: probe provenance — which inputs, drawn from
 where — is a first-class receipt field, because "passed the published
 suite" is void as evidence against a realization tuned to the suite.
+
+## `placement-bench/`
+
+Imports `core/placement.py` (PR-d2) and measures it on stenota's real
+eleven-node graph with three illustrative executors — a MacBook Air, a
+DGX-class LAN runner, the cloud. Runs in a fifth of a second:
+
+```bash
+cd spikes/placement-bench
+python3 bench.py      # six experiments, P1-P6
+```
+
+| | question | finding |
+|---|---|---|
+| P1 | does an unsatisfiable lock fail at plan time? | refused whole, naming the jobs and per-executor reasons |
+| P2 | region vs per-node on a real graph | per-node's crossings are constant (it cannot see them); its penalty is **52% at 3× crossing cost, 162% at 10×** |
+| P3 | do lock levels move compute? | `no-model-egress` re-forms around the LAN box; `full-airgap` collapses onto the device, price paid in compute |
+| P4 | is warm residency an input? | yes; at these costs it does not move ASR |
+| P5 | where did my data go? | nine strips touch the cloud under `open`, none under `no-model-egress` — from the plan record |
+| P6 | is the plan re-verifiable? | forged policy and forged cost both caught |
+
+Costs are illustrative (HARDWARE-TODO H10 replaces them). The lesson that
+was not planned: data locality is a constraint, not a cost — without
+pinning decode to the device, every scenario collapsed onto one executor.

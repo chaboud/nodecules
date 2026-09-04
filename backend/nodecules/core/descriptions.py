@@ -58,7 +58,7 @@ from nodecules.core.types import NodeSpec
 
 # Strip namespaces that hold decoration — labels *about* nodes. A functional
 # node may never read or write these; see `assert_functional`.
-DECORATION_NAMESPACES: Tuple[str, ...] = ("claims/", "hallmarks/", "vouches/")
+DECORATION_NAMESPACES: Tuple[str, ...] = ("claims/", "hallmarks/", "vouches/", "executors/", "plans/")
 
 ProbeProvenance = Literal["fixed-suite", "fresh-drawn", "workload"]
 Outcome = Literal["exact", "via-substitute"]  # identity axis

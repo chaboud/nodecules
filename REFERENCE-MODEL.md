@@ -7,10 +7,11 @@ v2 reference model; the working title "REFERENCE-MODEL" survives only as a
 filename.
 
 **Status:** Part I (the model) is design-only. Part II is design with
-three pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
+four pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
 access-pattern ADT — **PR-r2** (`ba9835a`) — the access-pattern
-resolver — and **PR-d1** — descriptions and the satisfies judgment
-(§22b). The rest of Part II is unbuilt.
+resolver — **PR-d1** — descriptions and the satisfies judgment (§22b)
+— and **PR-d2** — placement, the plan as an artifact (§22c). The rest
+of Part II is unbuilt.
 
 Seventh draft. v6 baked in **scope** as a first-class structural
 concept; v7 folds in **instance continuation / the settling spectrum**
@@ -756,6 +757,47 @@ decision margins (vault P-28). The description kind, claim kind, and
 hallmark kind as *store* nodes wait on PR-r3/r4; today they are Pydantic
 models over `NodeSpec`.
 
+## 22c. Placement — the plan as an artifact (PR-d2, shipped)
+
+Where compute runs is decided at **plan time, as data**, from four inputs:
+a graph of jobs (each node names a description, §22b; edges say who feeds
+whom), **executor advertisements** (locality — `on-device` / `lan` /
+`cloud` — the claims each serves, per-realization cost, what is warm),
+a **policy** (a lock level and what crossing between executors costs),
+and the evidence the satisfies judgment needs. The output is a **plan**:
+node → (executor, realization), the regions that induces, cost split into
+compute and boundary crossings, and a reason for every choice and every
+exclusion. It is content-addressed and re-verifiable, and it answers
+"where did my data go" from its own record.
+
+Three rules, each measured in `spikes/placement-bench/` on stenota's real
+eleven-node graph:
+
+- **Locks are planning constraints.** keyhole's lock levels become an
+  admission predicate — `no-model-egress` excludes cloud executors,
+  `full-airgap` everything but the device — applied *before* cost is
+  consulted, with the reason recorded. An unsatisfiable policy fails at
+  plan time with the job named; the plan is refused whole, because a
+  partial plan silently drops work.
+- **Binding granularity is a region** (vault ADR-0015). Per-node binding
+  picks each job's cheapest executor and pays the crossings afterwards;
+  region binding minimises compute plus crossings jointly (branch-and-
+  bound over admissible executors — exhaustive, capped, a partitioner
+  replaces it for large graphs). Data locality is a pin: a job whose
+  input exists only on one executor (the media file, a live mic) runs
+  there, and every other executor's exclusion says so.
+- **Plans and executor records are decoration** (vault ADR-0022): they
+  cite graphs, descriptions, and realizations by identity and are never
+  cited back; `assert_functional` covers the `plans/` and `executors/`
+  namespaces.
+
+Costs are declared today; the hardware runs replace them with measured
+ones, and the plan's `verify` re-derives every number from the executor
+records it names. What is *not* here yet: cross-executor transfer of the
+data itself (the store's sparse-replica tier, PR-r3), per-strip grant
+scopes as constraints (vault P-13), and any executor actually running a
+plan — this is the decision, not the dispatch.
+
 ---
 
 # Part III — Working notes
@@ -844,6 +886,13 @@ reference, content-addressed), `SatisfiesClaim` and `Hallmark` as
 decoration, `valence_check`, `assert_functional`, `run_assay`, `decide`,
 `verify_hallmark`. `core/assay_metrics.py`: `max_abs`, `wer`, `der`,
 open registry. Grounded on stenota's ASR and diar nodes (§22b). 41 tests.
+
+### PR-d2: placement — the plan as an artifact — SHIPPED
+`core/placement.py`: `Executor`, `Job` (with data-locality pins),
+`PlacementGraph`, `Policy` (lock level + boundary costs), `candidates`
+(locks, then the satisfies judgment), `plan` (per-node baseline vs
+region branch-and-bound), `data_flow`, `verify_plan`. Measured on
+stenota's real graph in `spikes/placement-bench/` (§22c). 18 tests.
 
 Unbuilt:
 

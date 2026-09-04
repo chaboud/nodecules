@@ -7,9 +7,10 @@ v2 reference model; the working title "REFERENCE-MODEL" survives only as a
 filename.
 
 **Status:** Part I (the model) is design-only. Part II is design with
-two pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
-access-pattern ADT — and **PR-r2** (`ba9835a`) — the access-pattern
-resolver. The rest of Part II is unbuilt.
+three pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
+access-pattern ADT — **PR-r2** (`ba9835a`) — the access-pattern
+resolver — and **PR-d1** — descriptions and the satisfies judgment
+(§22b). The rest of Part II is unbuilt.
 
 Seventh draft. v6 baked in **scope** as a first-class structural
 concept; v7 folds in **instance continuation / the settling spectrum**
@@ -674,6 +675,68 @@ Future (out of scope for v0.x):
 - **Redux-shaped action log.** Make the event log canonical;
   derive state from log replay.
 
+## 22b. Descriptions and the satisfies judgment (PR-d1, shipped)
+
+A **description** is a node that says what a job is — never how:
+
+- `consumes` — strips the job reads, each with the access pattern it
+  must be read with (the §5 ADT). This is the job's *valence*.
+- `produces` — strips the job writes, each with a schema id.
+- `tolerance` — a metric name and an acceptance line. **The metric ships
+  with the description**, because deviation is job-shaped: ASR is scored
+  by word error rate, diarization by a permutation-invariant DER, a colour
+  transform by max-abs. Metrics are an open registry
+  (`core/assay_metrics.py`).
+- `reference` — the realization the description ships as its conformance
+  oracle (the ingot's role, vault ADR-0014). Deviation is measured against
+  it; it is the fallback when nothing cheaper passes.
+
+A description's identity covers all four; its `name` is an alias and does
+not hash — two names for one contract are one contract.
+
+Binding a description is **two judgments** (vault ADR-0021, measured in
+`spikes/matching-bench/`):
+
+1. **Valence check** (structural): does a realization's `NodeSpec` declare
+   reads compatible with `consumes` and writes covering `produces`? Decided
+   without running anything. This is what *consumes* `reads_strip_patterns`
+   and `writes_strips` — the declarations now have a reader. It provably
+   cannot tell an impostor with an identical interface from the real thing.
+2. **Assay** (empirical): score the realization's output against the
+   reference's with the description's metric; accept iff within tolerance.
+   The assay certifies the probed subset, never a universal claim, so its
+   receipt — the **hallmark** — records probe provenance (`fixed-suite` /
+   `fresh-drawn` / `workload`). A published suite is Goodhart-void as
+   evidence; fresh workload-drawn probes detect defection at the harm
+   rate (bench M7–M8, vault P-32).
+
+The decision is then policy over survivors — cheapest passing plan — and
+the assay is applied *before* cost is consulted: the cheapest structurally
+valid plan in the bench was the wrong one. No survivor is an answer, not
+an error (E_NOINTERFACE). Every hallmark field is derivable from content
+(`outcome` follows from `realization == reference`), so an independent
+verifier can catch a forged receipt mechanically.
+
+**Claims and hallmarks are decoration, not graph elements** (vault
+ADR-0022). A `satisfies` claim cites a realization and a description by
+identity and hashes into neither; attaching, revoking, or rewriting one
+never perturbs the identity of the thing it is about. The direction is
+enforced: a functional node may not read or write the `claims/`,
+`hallmarks/`, or `vouches/` namespaces (`assert_functional`). Stated
+decoration — grade, cost class, locality — lives on the *claim*, not the
+description, because it describes the realization's offer.
+
+Grounded on the first two real descriptions, drafted from stenota's ASR
+and diarization nodes (`stenota_graph/contracts.py`): `asr/v1` (WER ≤ 0.15)
+and `diarize/v1` (DER ≤ 0.20). What the grounding exposed: the nodes had
+to be made statically describable first (they declared no strip access —
+the first slice of PR-r11); both jobs sit in the `equivalent` regime
+(neither model is byte-reproducible), so their receipts are always
+tolerance-relative; and the tolerances are first cuts awaiting measured
+decision margins (vault P-28). The description kind, claim kind, and
+hallmark kind as *store* nodes wait on PR-r3/r4; today they are Pydantic
+models over `NodeSpec`.
+
 ---
 
 # Part III — Working notes
@@ -755,6 +818,13 @@ against all nine stenota nodes; three patterns, not seven. 25 tests.
 extension, which was found near-empty (within-window cycles are
 detectable from strip names alone, and the grounded ADT has no
 past/future-direction patterns to exploit). 14 tests.
+
+### PR-d1: descriptions + the satisfies judgment — SHIPPED
+`core/descriptions.py`: `Description` (consumes / produces / tolerance /
+reference, content-addressed), `SatisfiesClaim` and `Hallmark` as
+decoration, `valence_check`, `assert_functional`, `run_assay`, `decide`,
+`verify_hallmark`. `core/assay_metrics.py`: `max_abs`, `wer`, `der`,
+open registry. Grounded on stenota's ASR and diar nodes (§22b). 41 tests.
 
 Unbuilt:
 
@@ -860,6 +930,10 @@ filter or a windowed Silero node is the likely first). ~250 +
   logs.
 - **Routing is graph structure.** Substitution, fallback, retry,
   migration — all nodes, not flags.
+- **Decoration never bonds into functional nodes.** Claims, hallmarks,
+  and vouches cite realizations and descriptions by identity; nothing
+  functional reads or writes them, so a label can never perturb the
+  identity of what it labels (§22b).
 - **Live inputs are scope-local.** Two scopes capturing the same
   hardware get independent capture nodes (resource handler
   multiplexes).

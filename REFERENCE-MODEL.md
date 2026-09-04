@@ -811,6 +811,23 @@ algorithmic. Every heuristic is a penalty, never a bonus, so the
 branch-and-bound lower bound stays valid ("keep the pipeline together" is
 expressed as "pay to break it").
 
+**What the substrate commits to, and what it does not** (founder,
+2026-08-29): the folded objective is one policy — the dumbest, on purpose.
+Multi-dimensional cost does not reduce to a vector and a weighting: linear
+scalarization misses the non-convex parts of the Pareto front, and once
+edge effects compound, optimal aggregation is NP-hard in general. A system
+may instead learn its own cost geometry — its own principal axes over
+observed runs, a Lipschitz-regularized surrogate, a person's judgment. The
+substrate's job is to make that possible by providing **identity** (every
+plan, assignment, and crossing content-addressed, so an observation
+attaches to exactly the thing that ran) and **observability** (measured
+costs emitted as `Observation` records against those identities, in every
+dimension, with what fired). So `plan_front` hands up the non-dominated
+set with each plan's full vector and hash and lets the policy choose, and
+`reconcile` lines observations up against what executors advertised — a
+cost table is a stated claim, an observation is the empirical one, and the
+gap recalibrates the advertisement. The aggregator is an upper layer.
+
 Costs are declared today; the hardware runs replace them with measured
 ones, and the plan's `verify` re-derives every number — vectors,
 heuristics, and the folded objective — from the executor records and

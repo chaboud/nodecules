@@ -43,6 +43,21 @@ because bouncing breaks pipelining and cache-friendly mechanics. So:
   applied uniformly by the optimiser and reported by name on the plan:
   system-design judgment encoded once, then algorithmic.
 
+What the substrate commits to, and what it does not (founder, 2026-08-29):
+the folded objective is **one policy, the dumbest**, deliberately. Multi-
+dimensional cost cannot be reduced to a vector and a fixed weighting —
+linear scalarization misses the non-convex parts of the Pareto front, and
+with compounding edge effects optimal aggregation is NP-hard in general. A
+system may instead learn its own cost geometry (its own PCA over observed
+runs, a Lipschitz-regularized surrogate, a human's judgment). The
+substrate's job is to make that *possible* by providing **identity** —
+every plan, assignment, and crossing content-addressed, so an observation
+attaches to exactly the thing that ran — and **observability** — measured
+costs emitted as records against those identities in every dimension,
+with what fired. Hence `plan_front` (hand up the non-dominated set, let the
+policy choose) and `Observation` / `reconcile` (measured against declared,
+keyed by identity). The aggregator is an upper layer.
+
 Three commitments, each measured in `spikes/placement-bench/`:
 
 - **Locks are planning constraints, not egress checks.** Excluded before
@@ -68,7 +83,7 @@ from nodecules.core.types import NodeSpec
 
 Locality = Literal["on-device", "lan", "cloud"]
 LockLevel = Literal["open", "no-model-egress", "full-airgap"]
-Method = Literal["region", "per-node"]
+Method = Literal["region", "per-node", "front"]
 BoundaryKind = Literal["bus", "lan", "wan"]
 
 _ADMITS: Dict[str, Set[str]] = {
@@ -460,6 +475,8 @@ class _Evaluator:
                  executors: Sequence[Executor], policy: Policy) -> None:
         self.policy = policy
         self.ex = {e.executor_id: e for e in executors}
+        self.pipelined = {e.executor_id: int(e.pipelined) for e in executors}
+        self._xcache: Dict[Tuple[str, str, float], Tuple[float, float, float]] = {}
         self.in_edges: Dict[str, List[Edge]] = {j.node_id: [] for j in graph.jobs}
         self.out_edges: Dict[str, List[Edge]] = {j.node_id: [] for j in graph.jobs}
         for e in edges:
@@ -476,6 +493,43 @@ class _Evaluator:
 
     def crossing(self, a: str, b: str, nbytes: float) -> CostVector:
         return self.policy.crossing(self.ex[a], self.ex[b], nbytes)[1]
+
+    def _xr(self, a: str, b: str, nbytes: float) -> Tuple[float, float, float]:
+        key = (a, b, nbytes)
+        hit = self._xcache.get(key)
+        if hit is None:
+            v = self.crossing(a, b, nbytes)
+            hit = self._xcache[key] = (v.latency, v.energy, v.money)
+        return hit
+
+    def on_assign_raw(self, node: str, exid: str, assign: Mapping[str, str]) -> Tuple[float, float, float]:
+        """Same accounting as `on_assign`, as a bare (latency, energy, money)
+        tuple with no records built — the search loops call this hundreds
+        of thousands of times; the record path is walked once."""
+        lat = en = mo = 0.0
+        h = self.policy.heuristics
+        fill = h.get("pipeline_fill_flush")
+        pingpong = h.get("pingpong")
+        for e in self.in_edges[node]:
+            a = assign.get(e.source)
+            if a is None or a == exid:
+                continue
+            x = self._xr(a, exid, e.bytes)
+            lat += x[0]; en += x[1]; mo += x[2]
+            if fill is not None:
+                lat += fill * (self.pipelined[a] + self.pipelined[exid])
+            if pingpong is not None and any(assign.get(q) == exid for q in self.ancestors[e.source]):
+                k = pingpong - 1.0
+                lat += x[0] * k; en += x[1] * k; mo += x[2] * k
+        for e in self.out_edges[node]:
+            b = assign.get(e.target)
+            if b is None or b == exid:
+                continue
+            x = self._xr(exid, b, e.bytes)
+            lat += x[0]; en += x[1]; mo += x[2]
+            if fill is not None:
+                lat += fill * (self.pipelined[exid] + self.pipelined[b])
+        return lat, en, mo
 
     def on_assign(self, node: str, exid: str, assign: Mapping[str, str]
                   ) -> Tuple[CostVector, CostVector, int, List[HeuristicHit]]:
@@ -570,6 +624,7 @@ def plan(
     else:
         best_cost = [float("inf")]
         best_assign: Dict[str, str] = {}
+        wl, we, wm = w.get("latency", 0.0), w.get("energy", 0.0), w.get("money", 0.0)
 
         def rec(i: int, cost: float) -> None:
             if cost >= best_cost[0]:
@@ -581,8 +636,8 @@ def plan(
                 return
             n = order[i]
             for c in ranked(n):
-                b, hv, _, _ = ev.on_assign(n, c.executor_id, assign)
-                add = c.compute.fold(w) + b.fold(w) + hv.fold(w)
+                lat, en, mo = ev.on_assign_raw(n, c.executor_id, assign)
+                add = c.compute.fold(w) + lat * wl + en * we + mo * wm
                 assign[n] = c.executor_id
                 rec(i + 1, cost + add)
                 del assign[n]
@@ -590,7 +645,14 @@ def plan(
         rec(0, 0.0)
         assign = dict(best_assign)
 
-    # Re-walk the final assignment to produce the record.
+    return Placement(plan=_build_plan(graph, edges, order, cands, excluded, ev, assign, policy, method))
+
+
+def _build_plan(graph: PlacementGraph, edges: Sequence[Edge], order: Sequence[str],
+                cands: Mapping[str, Mapping[str, Candidate]], excluded: Mapping[str, Mapping[str, str]],
+                ev: "_Evaluator", assign: Mapping[str, str], policy: Policy, method: Method) -> Plan:
+    """Walk a complete assignment in topological order and produce the record."""
+    w = policy.weights
     assignments: List[Assignment] = []
     compute = ZERO
     boundary = ZERO
@@ -614,13 +676,157 @@ def plan(
         assignments.append(Assignment(node_id=n, executor_id=c.executor_id, realization=c.realization,
                                       compute=c.compute, reason=reason))
     objective = compute.fold(w) + boundary.fold(w) + heur.fold(w)
-    return Placement(plan=Plan(
+    return Plan(
         graph_hash=graph.content_hash(), policy_hash=policy.content_hash(), method=method,
         assignments=tuple(assignments), regions=_regions(graph, edges, assign), crossings=crossings,
         compute=compute, boundary=boundary, heuristic=heur, heuristic_hits=tuple(hits),
         objective=objective, compute_cost=compute.fold(w), boundary_cost=boundary.fold(w),
-        heuristic_cost=heur.fold(w), excluded=excluded,
-    ))
+        heuristic_cost=heur.fold(w), excluded=dict(excluded),
+    )
+
+
+def _dominates(a: CostVector, b: CostVector) -> bool:
+    """a is at least as good as b in every dimension and better in one."""
+    le = a.latency <= b.latency and a.energy <= b.energy and a.money <= b.money
+    lt = a.latency < b.latency or a.energy < b.energy or a.money < b.money
+    return le and lt
+
+
+def plan_front(
+    graph: PlacementGraph,
+    executors: Sequence[Executor],
+    specs: Mapping[str, NodeSpec],
+    assays: Mapping[str, AssayResult],
+    policy: Policy,
+    *,
+    max_nodes: int = 12,
+) -> Tuple[Placement, Tuple[Plan, ...]]:
+    """The Pareto front: every admissible plan that no other plan beats in
+    all dimensions at once. The policy's weights are *not* applied to
+    choose — that is the caller's (or a learned aggregator's) job; the
+    substrate hands up the set with each plan's full vector and hash.
+    Exhaustive over admissible assignments, so capped lower than `plan`.
+    Heuristics apply (they are part of what a plan costs); the front is
+    over compute + boundary + heuristic totals."""
+    for name in policy.heuristics:
+        if name not in HEURISTICS:
+            raise ValueError(f"unknown heuristic {name!r}; known: {sorted(HEURISTICS)}")
+    edges = graph.edge_list()
+    order = _topological(graph, edges)
+    if len(order) > max_nodes:
+        raise ValueError(f"the front is exhaustive; {len(order)} nodes exceeds max_nodes={max_nodes}")
+    jobs = {j.node_id: j for j in graph.jobs}
+    cands: Dict[str, Dict[str, Candidate]] = {}
+    excluded: Dict[str, Dict[str, str]] = {}
+    for n in order:
+        c, x = candidates(jobs[n], executors, specs, assays, policy)
+        cands[n], excluded[n] = c, x
+    unsat = {n: excluded[n] for n in order if not cands[n]}
+    if unsat:
+        return Placement(plan=None, unsatisfiable=unsat), ()
+
+    ev = _Evaluator(graph, edges, executors, policy)
+    found: List[Tuple[Tuple[float, float, float], Tuple[str, ...]]] = []
+    assign: Dict[str, str] = {}
+    comp = {n: {ex: (c.compute.latency, c.compute.energy, c.compute.money) for ex, c in cands[n].items()}
+            for n in order}
+    choice: List[str] = []
+
+    def rec(i: int, lat: float, en: float, mo: float) -> None:
+        if i == len(order):
+            found.append(((lat, en, mo), tuple(choice)))
+            return
+        n = order[i]
+        for exid, (cl, ce, cm) in comp[n].items():
+            xl, xe, xm = ev.on_assign_raw(n, exid, assign)
+            assign[n] = exid
+            choice.append(exid)
+            rec(i + 1, lat + cl + xl, en + ce + xe, mo + cm + xm)
+            choice.pop()
+            del assign[n]
+
+    rec(0, 0.0, 0.0, 0.0)
+    # Non-dominated filter: sort by latency, then keep what nothing before beats.
+    found.sort()
+    front: List[Tuple[Tuple[float, float, float], Tuple[str, ...]]] = []
+    for v, a in found:
+        if not any(o[0] <= v[0] and o[1] <= v[1] and o[2] <= v[2] and o != v for o, _ in front):
+            front.append((v, a))
+    w = policy.weights
+    front.sort(key=lambda va: (va[0][0] * w.get("latency", 0.0) + va[0][1] * w.get("energy", 0.0)
+                               + va[0][2] * w.get("money", 0.0), va[0]))
+    plans = []
+    seen: Set[str] = set()
+    for _, a in front:
+        p = _build_plan(graph, edges, order, cands, excluded, ev, dict(zip(order, a)), policy, "front")
+        h = p.content_hash()
+        if h not in seen:
+            seen.add(h)
+            plans.append(p)
+    return Placement(plan=plans[0] if plans else None), tuple(plans)
+
+
+# --- Observability: what actually ran, keyed by identity ---------------------------
+
+
+class Observation(BaseModel):
+    """A measured cost, attached to exactly the thing that ran. Decoration:
+    cites a plan and an assignment (or a crossing) by identity; hashes into
+    nothing below it. This is the record any aggregator folds over — a
+    learned cost geometry needs a dataset, and this is its row."""
+
+    model_config = ConfigDict(frozen=True)
+    plan_hash: str = Field(min_length=1)
+    subject: str = Field(min_length=1)  # a node_id, or "edge:<source>-><target>"
+    executor_id: str = Field(min_length=1)
+    realization: Optional[str] = None
+    measured: CostVector
+    source: str = Field(min_length=1)  # who measured, where, when — provenance
+    peak_memory_bytes: Optional[float] = None
+
+    def content_hash(self) -> str:
+        return _content_hash(self.model_dump(mode="json"))
+
+
+class Discrepancy(BaseModel):
+    """Declared versus measured for one subject: the calibration signal.
+    An executor's cost table is a *stated* claim; observations are the
+    *empirical* one, and the gap between them is what recalibrates the
+    advertisement (vault ADR-0003's grades, applied to cost)."""
+
+    model_config = ConfigDict(frozen=True)
+    subject: str
+    executor_id: str
+    declared: CostVector
+    measured: CostVector
+    ratio_latency: Optional[float]  # measured / declared, None if declared is zero
+
+
+def reconcile(p: Plan, observations: Sequence[Observation], graph: PlacementGraph,
+              executors: Sequence[Executor], policy: Policy) -> Tuple[Discrepancy, ...]:
+    """Line up what the plan declared against what was observed for it.
+    Observations for other plans are ignored (identity is the join key);
+    subjects the plan never assigned are ignored too."""
+    by_id = {ex.executor_id: ex for ex in executors}
+    ev = _Evaluator(graph, graph.edge_list(), executors, policy)
+    declared: Dict[Tuple[str, str], CostVector] = {}
+    for a in p.assignments:
+        declared[(a.node_id, a.executor_id)] = a.compute
+    assign = {a.node_id: a.executor_id for a in p.assignments}
+    for e in graph.edge_list():
+        if assign[e.source] != assign[e.target]:
+            declared[(f"edge:{e.source}->{e.target}", assign[e.target])] =                 policy.crossing(by_id[assign[e.source]], by_id[assign[e.target]], e.bytes)[1]
+    out: List[Discrepancy] = []
+    for o in observations:
+        if o.plan_hash != p.content_hash():
+            continue
+        d = declared.get((o.subject, o.executor_id))
+        if d is None:
+            continue
+        ratio = (o.measured.latency / d.latency) if d.latency else None
+        out.append(Discrepancy(subject=o.subject, executor_id=o.executor_id,
+                               declared=d, measured=o.measured, ratio_latency=ratio))
+    return tuple(out)
 
 
 # --- Reading the plan back ------------------------------------------------------
@@ -694,6 +900,7 @@ def verify_plan(p: Plan, graph: PlacementGraph, executors: Sequence[Executor],
 __all__ = [
     "Assignment", "BoundaryKind", "BoundaryPrice", "Candidate", "CostVector", "Edge",
     "Executor", "HEURISTICS", "HeuristicHit", "Job", "Locality", "LockLevel", "Method",
-    "Placement", "PlacementGraph", "Plan", "Policy",
-    "boundary_kind", "candidates", "data_flow", "lock_admits", "plan", "verify_plan",
+    "Discrepancy", "Observation", "Placement", "PlacementGraph", "Plan", "Policy",
+    "boundary_kind", "candidates", "data_flow", "lock_admits", "plan", "plan_front",
+    "reconcile", "verify_plan",
 ]

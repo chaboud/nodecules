@@ -213,6 +213,57 @@ def p8_biases() -> None:
     print("     the plan reports every dimension so the trade-off is visible, not folded away.")
 
 
+def p9_the_front() -> None:
+    hdr(9, "Hand up the front, not the fold: every non-dominated plan for the real graph",
+        "founder 2026-08-29: aggregability is NP-hard; provide identity and observability")
+    from nodecules.core.placement import CostVector, Policy, plan_front
+    mba, spark, cloud = f.executors()
+    def energised(ex, watts, dollars_per_s):
+        cost = {}
+        for r, v in ex.cost.items():
+            lat = v if isinstance(v, (int, float)) else v.latency
+            cost[r] = CostVector(latency=lat, energy=lat * watts, money=lat * dollars_per_s)
+        return ex.model_copy(update={"cost": cost})
+    execs = (energised(mba, 8.0, 0.0), energised(spark, 400.0, 0.0), energised(cloud, 0.0, 0.002))
+    pol = Policy(lock_level="open", boundary_cost=f.BOUNDARY)
+    t0 = time.perf_counter()
+    _, front = plan_front(G, execs, f.SPECS, f.ASSAYS, pol)
+    dt = time.perf_counter() - t0
+    total = 3 ** 10
+    print(f"  {len(front)} non-dominated plans out of {total} admissible assignments (decode pinned), in {dt:.2f}s")
+    print(f"  that is {100 * len(front) / total:.1f}% of the space: in three dimensions the front is not a curve,")
+    print(f"  it is a surface with thousands of points. Nobody hands a person this; a reducer picks.\n")
+
+    def vec(p):
+        return p.compute + p.boundary + p.heuristic
+
+    def row(label, p):
+        v = vec(p)
+        by_ex: dict = {}
+        for a in p.assignments:
+            by_ex.setdefault(a.executor_id, []).append(a.node_id)
+        summary = "; ".join(f"{ex}:{len(ns)}" for ex, ns in sorted(by_ex.items()))
+        print(f"  {label:14s} {v.latency:9.1f}s {v.energy:10.0f}J ${v.money:6.2f} {p.content_hash()[:12]:>14s}  {summary}")
+
+    print(f"  {'':14s} {'latency':>10s} {'energy':>11s} {'money':>7s} {'hash':>14s}  placement")
+    row("min latency", min(front, key=lambda p: vec(p).latency))
+    row("min energy", min(front, key=lambda p: vec(p).energy))
+    row("min money", min(front, key=lambda p: vec(p).money))
+    by_lat = sorted(front, key=lambda p: vec(p).latency)
+    for k in (len(front) // 4, len(front) // 2, 3 * len(front) // 4):
+        row(f"latency q{k * 100 // len(front)}", by_lat[k])
+    print("\n  the three P8 biases each pick a point on this front:")
+    for label, weights in (("latency", {"latency": 1.0}), ("energy", {"latency": 0.02, "energy": 1.0}),
+                           ("money", {"latency": 0.02, "money": 5000.0})):
+        chosen = plan(G, execs, f.SPECS, f.ASSAYS, pol.model_copy(update={"weights": weights})).plan
+        key = tuple(a.executor_id for a in chosen.assignments)
+        idx = next(i for i, p in enumerate(front) if tuple(a.executor_id for a in p.assignments) == key)
+        print(f"      {label:8s} -> front #{idx}")
+    print("\n  => the substrate's commitment is the set and its hashes; which point to")
+    print("     take is a policy - static weights today, a learned geometry tomorrow -")
+    print("     and observations against these hashes are the dataset it learns from.")
+
+
 if __name__ == "__main__":
     p1_unsatisfiable()
     p2_region_vs_per_node()
@@ -222,4 +273,5 @@ if __name__ == "__main__":
     p6_the_artifact()
     p7_pingpong()
     p8_biases()
+    p9_the_front()
     print()

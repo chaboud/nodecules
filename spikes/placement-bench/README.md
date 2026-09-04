@@ -28,6 +28,7 @@ replaces them with measured numbers. The findings below are about
 | P5 | where did my data go? | under `open`, nine strips touched the cloud; under `no-model-egress`, **none** — derived from the plan record, not from trusting the runtime |
 | P6 | is the plan re-verifiable? | honest plan passes; a forged policy hash and a halved cost summary are both caught from content |
 | P7 | CPU→GPU→CPU on one machine | node costs alone bounce (19.6, 2 crossings); with `pingpong ×4` the plan **restructures** — decode moves onto the GPU so data enters once and leaves once (21.8, 1 crossing, +4 compute); the naive plan scored under the judged policy would cost 35.0, and the plan names every heuristic it would have paid |
+| P9 | hand up the front, not the fold | **2,779 non-dominated plans** out of 59,049 (4.7% of the space) in 7.5 s: in three dimensions the front is a surface, not a curve. Min-latency and min-money coincide (own hardware, 490 s); min-energy is the cloud at 610 s and 480 J vs 160 kJ. The three P8 biases pick points 0, 29, and 0 on it |
 | P8 | the same graph under three biases | latency-weighted: LAN box; energy-weighted (on battery): cloud, 480 J vs 160 kJ at +120 s; money-weighted: own hardware. Every dimension reported, so the trade-off is visible, not folded away |
 
 ## The cost model (P7–P8)
@@ -48,6 +49,24 @@ What P7 caught that the tests had not: the first ping-pong detector looked
 two hops back, and the naive plan's round trip spanned three edges
 (cpu → gpu → gpu → cpu), so it never fired. "Leave and come back" is a
 property of ancestry, not of adjacency — the detector now walks it.
+
+## What the substrate commits to (P9)
+
+Founder, 2026-08-29: aggregating multi-dimensional cost into one number is
+NP-hard in general, and linear weights cannot even reach the non-convex
+parts of the front. A system may learn its own cost geometry — its own
+principal axes over observed runs, a Lipschitz-regularized surrogate. The
+substrate's job is to make that possible by providing **identity** and
+**observability**, not to pick the reducer. So `plan_front` hands up every
+non-dominated plan with its full vector and hash, and `Observation` /
+`reconcile` attach measured costs to exactly the plan, node, or crossing
+that ran, and line them up against what the executor advertised — a cost
+table is a stated claim; the observation is the empirical one.
+
+P9 makes the stance concrete: with 2,779 points, nobody hands a person the
+front. A reducer picks — declared weights today, a learned geometry
+tomorrow — and the observations keyed by these hashes are the dataset it
+learns from. The fold is one policy, the dumbest, on purpose.
 
 ## What the bench taught
 
@@ -72,6 +91,10 @@ work silently is exactly the failure a plan exists to prevent.
 - Illustrative costs (above). Boundary costs are a per-locality-pair
   scalar; real transfer cost depends on what is crossing (a sidecar of
   JSONL versus an hour of PCM).
+- The front is exhaustive over admissible assignments (59,049 here, 7.5 s
+  with an allocation-free evaluator); it is capped at twelve nodes, and a
+  larger graph needs an approximate front (ε-dominance, sampling), not a
+  higher cap.
 - Three executors, eleven nodes: branch-and-bound is instant. It is
   exhaustive in the worst case and capped at sixteen nodes; larger graphs
   need a partitioner, and the cap is a refusal, not a fallback.

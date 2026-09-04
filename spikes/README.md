@@ -87,7 +87,7 @@ DGX-class LAN runner, the cloud. Runs in a fifth of a second:
 
 ```bash
 cd spikes/placement-bench
-python3 bench.py      # eight experiments, P1-P8
+python3 bench.py      # nine experiments, P1-P9
 ```
 
 | | question | finding |
@@ -100,6 +100,7 @@ python3 bench.py      # eight experiments, P1-P8
 | P6 | is the plan re-verifiable? | forged policy and forged cost both caught |
 | P7 | CPU→GPU→CPU on one machine | node costs alone bounce; with the `pingpong` heuristic the plan **restructures** to enter the GPU once; the naive plan would pay 35.0 vs 26.8 under the judged policy |
 | P8 | same graph, three biases | latency → LAN box; energy → cloud (480 J vs 160 kJ); money → own hardware. All dimensions reported |
+| P9 | hand up the front, not the fold | **2,779 non-dominated plans** (4.7% of the space) on the real graph — a surface, not a curve; the three biases pick points 0, 29, 0. Observations keyed by plan hash are the dataset a learned reducer folds over |
 
 Costs are illustrative (HARDWARE-TODO H10 replaces them). Two lessons that
 were not planned: data locality is both a constraint (the pin) and a cost

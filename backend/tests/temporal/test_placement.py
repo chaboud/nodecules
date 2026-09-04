@@ -27,7 +27,10 @@ from nodecules.core.placement import (
     data_flow,
     lock_admits,
     plan,
+    plan_front,
+    reconcile,
     verify_plan,
+    Observation,
 )
 from nodecules.core.types import NodeSpec
 
@@ -362,3 +365,77 @@ class TestCostModel:
         assert verify_plan(quiet, graph, execs, policy)[0] is False
         no_hits = p.model_copy(update={"heuristic": CostVector()})
         assert verify_plan(no_hits, graph, execs, policy)[0] is False
+
+
+# --- The front, and observations: identity and observability ------------------
+
+
+class TestFrontAndObservations:
+    def _tradeoff(self):
+        descs, specs, assays = _world(["a", "b"])
+        graph = PlacementGraph(graph_id="tr", jobs=(Job(node_id="A", description=descs["a"]),
+                                                    Job(node_id="B", description=descs["b"])),
+                               edges=(("A", "B"),))
+        fast = Executor(executor_id="fast", locality="lan", claims=_claims(descs, ["a", "b"]),
+                        cost={"ref.a": CostVector(latency=1, energy=10), "ref.b": CostVector(latency=1, energy=10)})
+        frugal = Executor(executor_id="frugal", locality="on-device", claims=_claims(descs, ["a", "b"]),
+                          cost={"ref.a": CostVector(latency=5, energy=1), "ref.b": CostVector(latency=5, energy=1)})
+        return graph, (fast, frugal), specs, assays
+
+    def test_front_is_the_non_dominated_set(self) -> None:
+        graph, execs, specs, assays = self._tradeoff()
+        policy = Policy(boundary={"lan": BoundaryPrice(fixed=CostVector(latency=3, energy=3))})
+        _, front = plan_front(graph, execs, specs, assays, policy)
+        vectors = [(p.compute + p.boundary + p.heuristic) for p in front]
+        # all-fast (2, 20), all-frugal (10, 2), and the two mixed plans at
+        # (9, 14) — a crossing-paying plan can still be non-dominated: it is
+        # faster than frugal and leaner than fast. Nothing beats it on both.
+        assert {(v.latency, v.energy) for v in vectors} == {(2.0, 20.0), (9.0, 14.0), (10.0, 2.0)}
+        assert len(front) == 4  # the two mixed plans are distinct assignments
+        for p in front:
+            assert p.method == "front"
+
+    def test_scalar_plan_is_a_point_on_the_front(self) -> None:
+        graph, execs, specs, assays = self._tradeoff()
+        policy = Policy(boundary={"lan": BoundaryPrice(fixed=CostVector(latency=3, energy=3))},
+                        weights={"latency": 1.0, "energy": 1.0})
+        chosen = plan(graph, execs, specs, assays, policy).plan
+        _, front = plan_front(graph, execs, specs, assays, policy)
+        assert any(p.assignments == chosen.assignments for p in front)
+        # A different bias picks a different point; the front did not change.
+        _, front2 = plan_front(graph, execs, specs, assays, policy.model_copy(update={"weights": {"energy": 1.0}}))
+        key = lambda p: tuple(a.executor_id for a in p.assignments)
+        assert {key(p) for p in front} == {key(p) for p in front2}
+        assert key(front2[0]) == ("frugal", "frugal")  # the energy bias sorts the lean point first
+
+    def test_front_respects_unsatisfiable(self) -> None:
+        graph, execs, specs, assays = self._tradeoff()
+        placement, front = plan_front(graph, execs, specs, assays, Policy(lock_level="full-airgap"))
+        assert placement.plan is not None and front and all(p.executor_of("A") == "frugal" for p in front)
+        only_lan = (execs[0],)
+        placement2, front2 = plan_front(graph, only_lan, specs, assays, Policy(lock_level="full-airgap"))
+        assert placement2.plan is None and front2 == () and "A" in placement2.unsatisfiable
+
+    def test_observations_reconcile_against_the_plan_by_identity(self) -> None:
+        graph, execs, specs, assays, _ = _chain()
+        policy = Policy(default_boundary=0.1)
+        p = plan(graph, execs, specs, assays, policy).plan  # X, Y, X
+        obs = [
+            Observation(plan_hash=p.content_hash(), subject="B", executor_id="Y", realization="ref.b",
+                        measured=CostVector(latency=3.0), source="hardware-run:test"),
+            Observation(plan_hash=p.content_hash(), subject="edge:A->B", executor_id="Y",
+                        measured=CostVector(latency=0.4), source="hardware-run:test"),
+            Observation(plan_hash="someone-elses-plan", subject="B", executor_id="Y",
+                        measured=CostVector(latency=99.0), source="noise"),
+            Observation(plan_hash=p.content_hash(), subject="B", executor_id="X",
+                        measured=CostVector(latency=99.0), source="not-where-it-ran"),
+        ]
+        disc = reconcile(p, obs, graph, execs, policy)
+        assert [(d.subject, d.executor_id) for d in disc] == [("B", "Y"), ("edge:A->B", "Y")]
+        assert disc[0].declared.latency == 1.0 and disc[0].ratio_latency == 3.0
+        assert disc[1].declared.latency == pytest.approx(0.1) and disc[1].ratio_latency == pytest.approx(4.0)
+
+    def test_observations_are_decoration(self) -> None:
+        assert "observations/" in DECORATION_NAMESPACES
+        o = Observation(plan_hash="p", subject="A", executor_id="X", measured=CostVector(latency=1.0), source="s")
+        assert o.content_hash() == o.model_copy().content_hash()

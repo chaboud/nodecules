@@ -817,7 +817,9 @@ Multi-dimensional cost does not reduce to a vector and a weighting: linear
 scalarization misses the non-convex parts of the Pareto front, and once
 edge effects compound, optimal aggregation is NP-hard in general. A system
 may instead learn its own cost geometry — its own principal axes over
-observed runs, a Lipschitz-regularized surrogate, a person's judgment. The
+observed runs, or Least Volume Analysis (Chen, Diniz, Fuge,
+arXiv:2404.17773: latent volume minimisation under a K-Lipschitz decoder,
+PCA's ordering without its linearity), or a person's judgment. The
 substrate's job is to make that possible by providing **identity** (every
 plan, assignment, and crossing content-addressed, so an observation
 attaches to exactly the thing that ran) and **observability** (measured

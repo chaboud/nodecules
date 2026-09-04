@@ -21,13 +21,13 @@ Three ship, grounded on the first three real descriptions:
             reference word count.
   der     — diarization error rate over exclusive speaker turns:
             (missed + false alarm + confusion) / reference speech time,
-            minimised over injective label mappings.
+            minimised over injective label mappings (Hungarian method, so
+            a 40-speaker town hall costs the same as a two-person call).
 """
 
 from __future__ import annotations
 
-import itertools
-from typing import Callable, Dict, Sequence, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 Metric = Callable[[object, object], float]
 
@@ -119,8 +119,6 @@ def wer(candidate_words: Sequence[str], reference_words: Sequence[str]) -> float
 
 Turn = Tuple[int, int, str]  # (start_ms, end_ms, label), closed-open
 
-_MAX_DER_LABELS = 8
-
 
 def _label_at(turns: Sequence[Turn], start: int, end: int):
     for s, e, label in turns:
@@ -129,14 +127,78 @@ def _label_at(turns: Sequence[Turn], start: int, end: int):
     return None
 
 
+def _max_assignment(weights: List[List[int]]) -> int:
+    """Maximum-weight injective assignment of rows to columns.
+
+    Kuhn–Munkres with potentials, O(k³) for k = max(rows, cols); the
+    rectangular case is padded to square with zero-weight cells, which
+    never beat a real match. Used by `der` to map candidate labels onto
+    reference labels; small enough to own rather than import.
+    """
+    n = len(weights)
+    m = len(weights[0]) if n else 0
+    if n == 0 or m == 0:
+        return 0
+    k = max(n, m)
+    inf = float("inf")
+    cost = [[0] * (k + 1) for _ in range(k + 1)]
+    for i in range(n):
+        for j in range(m):
+            cost[i + 1][j + 1] = -weights[i][j]
+    u = [0.0] * (k + 1)
+    v = [0.0] * (k + 1)
+    p = [0] * (k + 1)
+    way = [0] * (k + 1)
+    for i in range(1, k + 1):
+        p[0] = i
+        j0 = 0
+        minv = [inf] * (k + 1)
+        used = [False] * (k + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = inf
+            j1 = 0
+            for j in range(1, k + 1):
+                if used[j]:
+                    continue
+                cur = cost[i0][j] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta:
+                    delta = minv[j]
+                    j1 = j
+            for j in range(k + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+    total = 0
+    for j in range(1, k + 1):
+        row = p[j]
+        if row and row <= n and j <= m:
+            total += weights[row - 1][j - 1]
+    return total
+
+
 def der(candidate: Sequence[Turn], reference: Sequence[Turn]) -> float:
     """Diarization error rate, permutation-invariant over labels.
 
     Turns are exclusive (at most one speaker at a time on each side —
     stenota's diar contract). The candidate's labels are mapped onto the
-    reference's by the injective mapping that maximises matched speech;
-    what remains is confusion. Brute force over mappings, capped at 8
-    labels per side — beyond that, bring the Hungarian method.
+    reference's by the injective mapping that maximises matched speech
+    (`_max_assignment`); what remains is confusion.
     """
     ref_total = sum(e - s for s, e, _ in reference)
     if ref_total <= 0:
@@ -153,29 +215,17 @@ def der(candidate: Sequence[Turn], reference: Sequence[Turn]) -> float:
     false_alarm = sum(d for rl, hl, d in cells if rl is None and hl is not None)
     both = sum(d for rl, hl, d in cells if rl is not None and hl is not None)
 
-    overlap: Dict[Tuple[str, str], int] = {}
-    for rl, hl, d in cells:
-        if rl is not None and hl is not None:
-            overlap[(hl, rl)] = overlap.get((hl, rl), 0) + d
-
     hyp_labels = sorted({hl for _, hl, _ in cells if hl is not None})
     ref_labels = sorted({rl for rl, _, _ in cells if rl is not None})
-    if len(hyp_labels) > _MAX_DER_LABELS or len(ref_labels) > _MAX_DER_LABELS:
-        raise ValueError(
-            f"der: brute-force mapping supports up to {_MAX_DER_LABELS} labels per side"
-        )
+    hyp_index = {h: i for i, h in enumerate(hyp_labels)}
+    ref_index = {r: j for j, r in enumerate(ref_labels)}
+    weights = [[0] * len(ref_labels) for _ in hyp_labels]
+    for rl, hl, d in cells:
+        if rl is not None and hl is not None:
+            weights[hyp_index[hl]][ref_index[rl]] += d
 
-    best = 0
-    if len(hyp_labels) <= len(ref_labels):
-        for perm in itertools.permutations(ref_labels, len(hyp_labels)):
-            matched = sum(overlap.get((h, r), 0) for h, r in zip(hyp_labels, perm))
-            best = max(best, matched)
-    else:
-        for perm in itertools.permutations(hyp_labels, len(ref_labels)):
-            matched = sum(overlap.get((h, r), 0) for h, r in zip(perm, ref_labels))
-            best = max(best, matched)
-
-    confusion = both - best
+    matched = _max_assignment(weights)
+    confusion = both - matched
     return (missed + false_alarm + confusion) / ref_total
 
 

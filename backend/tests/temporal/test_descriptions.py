@@ -237,6 +237,33 @@ class TestMetrics:
         hyp = [(0, 4000, "X")]
         assert der(hyp, ref) == pytest.approx(0.25)
 
+    def test_der_mapping_matches_brute_force_oracle(self) -> None:
+        # The Hungarian assignment must agree with exhaustive search on
+        # small random weight matrices, including rectangular ones.
+        import itertools
+        import random
+
+        from nodecules.core.assay_metrics import _max_assignment
+
+        rng = random.Random(7)
+        for _ in range(200):
+            n, m = rng.randint(1, 5), rng.randint(1, 5)
+            w = [[rng.randint(0, 9) for _ in range(m)] for _ in range(n)]
+            if n <= m:
+                brute = max(sum(w[i][j] for i, j in enumerate(perm))
+                            for perm in itertools.permutations(range(m), n))
+            else:
+                brute = max(sum(w[i][j] for j, i in enumerate(perm))
+                            for perm in itertools.permutations(range(n), m))
+            assert _max_assignment(w) == brute, (w, _max_assignment(w), brute)
+
+    def test_der_scales_past_eight_speakers(self) -> None:
+        # A town hall: 12 speakers, candidate labels shuffled. Still exact,
+        # and no combinatorial blow-up.
+        ref = [(i * 1000, (i + 1) * 1000, f"SPEAKER_{i:02d}") for i in range(12)]
+        hyp = [(s, e, f"CLUSTER_{(int(l[-2:]) * 7) % 12:02d}") for s, e, l in ref]
+        assert der(hyp, ref) == 0.0
+
     def test_max_abs_matches_the_bench(self) -> None:
         assert max_abs([(0.1, 0.2, 0.3)], [(0.1, 0.2, 0.3)]) == 0.0
         assert max_abs([(0.1, 0.2, 0.3)], [(0.1, 0.25, 0.3)]) == pytest.approx(0.05)

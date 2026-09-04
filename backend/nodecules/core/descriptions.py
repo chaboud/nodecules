@@ -22,6 +22,24 @@ reference them back — attaching a claim never perturbs the identity of the
 thing claimed about. The direction is enforced by `assert_functional`,
 which rejects any node reading or writing a decoration namespace.
 
+A receipt has **two independent axes** (founder, 2026-08-29: absolute
+reproducibility is achievable for some graph types, and rare):
+
+  identity        — `outcome`: `exact` if the realization *is* the
+                    description's reference, `via-substitute` otherwise.
+  reproducibility — `exact` if the realization declares itself
+                    deterministic AND measured zero deviation on the
+                    probes; `equivalent` otherwise. Unknown determinism is
+                    `equivalent` — default to perturbing (ADR-0009).
+
+A bit-identical isomer is `via-substitute` + `exact`; a nondeterministic
+reference re-run against itself is `exact` + `equivalent`. Where a graph
+type can be absolutely reproducible, a description may *demand* it
+(`Tolerance.require_exact`): a realization declaring nondeterminism fails
+the valence check, and one declaring determinism that measures nonzero
+has falsified its own declaration — the stated claim is caught by the
+empirical check, which is what declarations are for.
+
 This module judges; it does not execute. Running a realization over probe
 inputs is the scheduler's job; `run_assay` takes the outputs.
 """
@@ -43,7 +61,8 @@ from nodecules.core.types import NodeSpec
 DECORATION_NAMESPACES: Tuple[str, ...] = ("claims/", "hallmarks/", "vouches/")
 
 ProbeProvenance = Literal["fixed-suite", "fresh-drawn", "workload"]
-Outcome = Literal["exact", "via-substitute"]
+Outcome = Literal["exact", "via-substitute"]  # identity axis
+Reproducibility = Literal["exact", "equivalent"]  # reproducibility axis
 
 
 def _content_hash(payload: Any) -> str:
@@ -86,6 +105,11 @@ class Tolerance(BaseModel):
     model_config = ConfigDict(frozen=True)
     metric: str = Field(min_length=1)
     max_value: float = Field(ge=0.0)
+    # Demand absolute reproducibility: only a realization that declares
+    # itself deterministic and measures zero deviation may bind. For the
+    # graph types that can have it — pure transforms, seeded PRNGs, WASM
+    # ingots — and no others.
+    require_exact: bool = False
 
     def passes(self, measured: float) -> bool:
         return measured <= self.max_value
@@ -156,10 +180,23 @@ class Hallmark(BaseModel):
     n_probes: int = Field(ge=1)
     probe_provenance: ProbeProvenance
     probe_seed: Optional[str] = None
+    # The reproducibility axis. `declared_deterministic` is the stated
+    # claim (NodeSpec.is_deterministic, or None if nobody said); the class
+    # is derived from it and the measurement, never asserted directly.
+    declared_deterministic: Optional[bool] = None
+    reproducibility: Reproducibility = "equivalent"
 
     @staticmethod
     def derive_outcome(realization: str, reference: str) -> Outcome:
         return "exact" if realization == reference else "via-substitute"
+
+    @staticmethod
+    def derive_reproducibility(
+        declared_deterministic: Optional[bool], measured: float
+    ) -> Reproducibility:
+        """`exact` needs both a deterministic declaration and zero measured
+        deviation; anything less — including not knowing — is `equivalent`."""
+        return "exact" if declared_deterministic is True and measured == 0.0 else "equivalent"
 
     def content_hash(self) -> str:
         return _content_hash(self.model_dump(mode="json"))
@@ -199,6 +236,11 @@ def valence_check(spec: NodeSpec, desc: Description) -> List[str]:
     for out in desc.produces:
         if out.strip_name not in writes:
             problems.append(f"{spec.node_type} does not write {out.strip_name!r}")
+    if desc.tolerance.require_exact and spec.is_deterministic is False:
+        problems.append(
+            f"{spec.node_type} declares itself nondeterministic; "
+            "description requires exact reproducibility"
+        )
     return problems
 
 
@@ -244,10 +286,13 @@ def run_assay(
     probe_provenance: ProbeProvenance,
     probe_seed: Optional[str] = None,
     cost_s: float = 0.0,
+    declared_deterministic: Optional[bool] = None,
 ) -> AssayResult:
     """Score a realization's output against the reference's with the
     description's metric and issue the hallmark. Execution happened
-    elsewhere; this judges what came out."""
+    elsewhere; this judges what came out. `declared_deterministic` is the
+    realization's own claim (its NodeSpec); leave it None if unknown and
+    the receipt will say `equivalent`."""
     measured = score(desc.tolerance.metric, candidate_output, reference_output)
     hallmark = Hallmark(
         realization=realization,
@@ -260,6 +305,8 @@ def run_assay(
         n_probes=n_probes,
         probe_provenance=probe_provenance,
         probe_seed=probe_seed,
+        declared_deterministic=declared_deterministic,
+        reproducibility=Hallmark.derive_reproducibility(declared_deterministic, measured),
     )
     return AssayResult(
         realization=realization, measured=measured, cost_s=cost_s, hallmark=hallmark
@@ -314,6 +361,13 @@ def decide(
                 f"exceeds {desc.tolerance.max_value:.4g}"
             )
             continue
+        if desc.tolerance.require_exact and assay.hallmark.reproducibility != "exact":
+            rejected[r] = (
+                "reproducibility: description requires exact; "
+                f"declared_deterministic={assay.hallmark.declared_deterministic}, "
+                f"measured={assay.measured:.4g}"
+            )
+            continue
         passing.append(assay)
     if not passing:
         return Binding(description_hash=want, rejected=rejected)
@@ -322,11 +376,18 @@ def decide(
 
 
 def verify_hallmark(
-    hallmark: Hallmark, desc: Description, *, remeasured: float
+    hallmark: Hallmark,
+    desc: Description,
+    *,
+    remeasured: float,
+    declared_deterministic: Optional[bool] = None,
 ) -> Tuple[bool, str]:
     """An independent check that trusts nothing in the receipt it can
     recompute: the description it names, the outcome the hashes imply,
-    and whether a fresh measurement still passes."""
+    whether a fresh measurement still passes, and — if the receipt claims
+    exact reproducibility — whether that survives re-measurement against
+    the realization's declaration (pass the NodeSpec's `is_deterministic`
+    if you can see it; otherwise the receipt's own record is used)."""
     if hallmark.description_hash != desc.content_hash():
         return False, "receipt was issued against a different description"
     if hallmark.reference != desc.reference:
@@ -339,7 +400,14 @@ def verify_hallmark(
             f"re-measured {desc.tolerance.metric}={remeasured:.4g} exceeds "
             f"{desc.tolerance.max_value:.4g}"
         )
-    return True, "hashes, outcome, and re-measurement consistent"
+    declared = declared_deterministic if declared_deterministic is not None else hallmark.declared_deterministic
+    if hallmark.reproducibility == "exact":
+        if Hallmark.derive_reproducibility(declared, remeasured) != "exact":
+            return False, (
+                "receipt claims exact reproducibility but re-measurement "
+                f"({remeasured:.4g}) or the declaration ({declared}) does not support it"
+            )
+    return True, "hashes, outcome, reproducibility, and re-measurement consistent"
 
 
 __all__ = [
@@ -351,6 +419,7 @@ __all__ = [
     "Outcome",
     "ProbeProvenance",
     "ProducedStrip",
+    "Reproducibility",
     "SatisfiesClaim",
     "StripRequirement",
     "Tolerance",

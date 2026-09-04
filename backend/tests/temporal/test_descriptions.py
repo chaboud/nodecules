@@ -351,6 +351,81 @@ class TestDecide:
         assert b.chosen is None and b.rejected == {}
 
 
+class TestReproducibilityAxis:
+    """Identity and reproducibility are independent axes on a receipt."""
+
+    def _run(self, realization, words, *, deterministic):
+        return run_assay(ASR_V1, realization, words, REF_WORDS, n_probes=1,
+                         probe_provenance="fresh-drawn",
+                         declared_deterministic=deterministic).hallmark
+
+    def test_same_realization_deterministic_zero_is_exact_exact(self) -> None:
+        h = self._run("stenota.asr_faster_whisper@0.1.0", REF_WORDS, deterministic=True)
+        assert (h.outcome, h.reproducibility) == ("exact", "exact")
+
+    def test_same_realization_nondeterministic_is_exact_equivalent(self) -> None:
+        # A nondeterministic reference re-run against itself: identity says
+        # exact, reproducibility says equivalent even at zero measured.
+        h = self._run("stenota.asr_faster_whisper@0.1.0", REF_WORDS, deterministic=False)
+        assert (h.outcome, h.reproducibility) == ("exact", "equivalent")
+
+    def test_bit_identical_isomer_is_substitute_exact(self) -> None:
+        h = self._run("tiny-asr@0.3.0", REF_WORDS, deterministic=True)
+        assert (h.outcome, h.reproducibility) == ("via-substitute", "exact")
+
+    def test_unknown_determinism_defaults_to_equivalent(self) -> None:
+        h = self._run("tiny-asr@0.3.0", REF_WORDS, deterministic=None)
+        assert h.reproducibility == "equivalent"
+
+    def test_require_exact_rejects_declared_nondeterministic_at_valence(self) -> None:
+        strict = ASR_V1.model_copy(update={"tolerance": Tolerance(metric="wer", max_value=0.0, require_exact=True)})
+        spec = NodeSpec(node_type="whisper", display_name="w", description="",
+                        reads_strip_patterns=[StripAccess(strip_name=AUDIO, pattern=LatestPattern())],
+                        writes_strips=[ASR_STRIP], is_deterministic=False)
+        problems = valence_check(spec, strict)
+        assert any("requires exact reproducibility" in p for p in problems)
+
+    def test_require_exact_rejects_falsified_declaration_at_decide(self) -> None:
+        # Declared deterministic, measured nonzero: passes tolerance if
+        # loose enough, but cannot bind where exact is demanded — and the
+        # rejection names the declaration it falsified.
+        strict = ASR_V1.model_copy(update={"tolerance": Tolerance(metric="wer", max_value=0.2, require_exact=True)})
+        claim = SatisfiesClaim(realization="tiny-asr@0.3.0", description_hash=strict.content_hash(), claimant="v")
+        specs = {"tiny-asr@0.3.0": _spec("tiny-asr@0.3.0", [(AUDIO, LatestPattern())], [ASR_STRIP])}
+        near = "we should ship the store before a scheduler".split()
+        assays = {"tiny-asr@0.3.0": run_assay(strict, "tiny-asr@0.3.0", near, REF_WORDS, n_probes=1,
+                                              probe_provenance="fresh-drawn", declared_deterministic=True)}
+        b = decide(strict, [claim], specs, assays)
+        assert b.chosen is None
+        assert b.rejected["tiny-asr@0.3.0"].startswith("reproducibility:")
+
+    def test_require_exact_binds_a_truly_exact_realization(self) -> None:
+        strict = ASR_V1.model_copy(update={"tolerance": Tolerance(metric="wer", max_value=0.0, require_exact=True)})
+        claim = SatisfiesClaim(realization="tiny-asr@0.3.0", description_hash=strict.content_hash(), claimant="v")
+        specs = {"tiny-asr@0.3.0": _spec("tiny-asr@0.3.0", [(AUDIO, LatestPattern())], [ASR_STRIP])}
+        assays = {"tiny-asr@0.3.0": run_assay(strict, "tiny-asr@0.3.0", REF_WORDS, REF_WORDS, n_probes=1,
+                                              probe_provenance="fresh-drawn", declared_deterministic=True)}
+        b = decide(strict, [claim], specs, assays)
+        assert b.chosen is not None and b.chosen.hallmark.reproducibility == "exact"
+
+    def test_verify_catches_exact_claim_that_remeasures_nonzero(self) -> None:
+        h = self._run("tiny-asr@0.3.0", REF_WORDS, deterministic=True)
+        assert h.reproducibility == "exact"
+        ok, why = verify_hallmark(h, ASR_V1, remeasured=0.02)
+        assert not ok and "claims exact reproducibility" in why
+
+    def test_verify_catches_exact_claim_against_nondeterministic_spec(self) -> None:
+        forged = self._run("tiny-asr@0.3.0", REF_WORDS, deterministic=None).model_copy(
+            update={"reproducibility": "exact"})
+        ok, why = verify_hallmark(forged, ASR_V1, remeasured=0.0, declared_deterministic=False)
+        assert not ok and "declaration" in why
+
+    def test_verify_accepts_conservative_equivalent(self) -> None:
+        h = self._run("tiny-asr@0.3.0", REF_WORDS, deterministic=False)
+        ok, _ = verify_hallmark(h, ASR_V1, remeasured=0.0, declared_deterministic=True)
+        assert ok  # saying less than you could is never a lie
+
+
 class TestHallmark:
     def test_outcome_is_derived_from_identity(self) -> None:
         exact = _assay("stenota.asr_faster_whisper@0.1.0", REF_WORDS, 1.0).hallmark

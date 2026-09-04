@@ -710,6 +710,25 @@ Binding a description is **two judgments** (vault ADR-0021, measured in
    evidence; fresh workload-drawn probes detect defection at the harm
    rate (bench M7–M8, vault P-32).
 
+A hallmark has **two independent axes**. *Identity* (`outcome`): `exact`
+if the realization is the description's reference, `via-substitute`
+otherwise. *Reproducibility*: `exact` only if the realization declares
+itself deterministic (`NodeSpec.is_deterministic`) **and** measured zero
+deviation on the probes; `equivalent` otherwise — including when nobody
+said, because unknown determinism is perturbing (vault ADR-0009). A
+bit-identical isomer is `via-substitute` + `exact`; a nondeterministic
+reference re-run against itself is `exact` + `equivalent`. Absolute
+reproducibility is achievable for some graph types — pure transforms,
+seeded PRNGs, integer and symbolic pipelines, WASM ingots (deterministic
+semantics by construction) — and it is rare. Where a graph type can have
+it, a description demands it (`Tolerance.require_exact`): a realization
+declaring nondeterminism fails the valence check, and one declaring
+determinism that measures nonzero has falsified its own declaration — the
+stated claim caught by the empirical one. This is how §6's four generation
+outcomes decompose: `exact` / `equivalent` is the reproducibility axis,
+`via substitute` the identity axis, `lost` the absence of a result on
+either.
+
 The decision is then policy over survivors — cheapest passing plan — and
 the assay is applied *before* cost is consulted: the cheapest structurally
 valid plan in the bench was the wrong one. No survivor is an answer, not

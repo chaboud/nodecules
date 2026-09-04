@@ -791,9 +791,30 @@ eleven-node graph:
   cited back; `assert_functional` covers the `plans/` and `executors/`
   namespaces.
 
+**The cost model** (founder, 2026-08-29): nodes and edges both cost, in
+several dimensions, and edge costs compound. A node's compute, memory, and
+bus use land on latency, energy, and money; costs are **vectors**
+(`CostVector`) and the policy's **weights** fold them into the objective —
+a phone weighs energy and thermals, a datacenter weighs money — so the
+same graph plans differently under different biases. Memory is a capacity
+*constraint*, not a sum. An edge that crosses a boundary pays by the
+boundary's *kind* — `bus` between devices on one host, `lan` between
+hosts, `wan` when the cloud is involved — a fixed part plus a per-byte
+part, so data locality is a cost with the pin as its infinite case. And
+crossing costs **compound**: a CPU → GPU → CPU ping-pong can be the
+fastest plan node-by-node and the worst in practice, because bouncing
+breaks pipelining and cache warmth. Those effects are **compound
+heuristics declared as data** in the policy (`pingpong`,
+`pipeline_fill_flush`), applied uniformly by the optimiser and reported by
+name and location on the plan — system-design judgment encoded once, then
+algorithmic. Every heuristic is a penalty, never a bonus, so the
+branch-and-bound lower bound stays valid ("keep the pipeline together" is
+expressed as "pay to break it").
+
 Costs are declared today; the hardware runs replace them with measured
-ones, and the plan's `verify` re-derives every number from the executor
-records it names. What is *not* here yet: cross-executor transfer of the
+ones, and the plan's `verify` re-derives every number — vectors,
+heuristics, and the folded objective — from the executor records and
+policy it names. What is *not* here yet: cross-executor transfer of the
 data itself (the store's sparse-replica tier, PR-r3), per-strip grant
 scopes as constraints (vault P-13), and any executor actually running a
 plan — this is the decision, not the dispatch.

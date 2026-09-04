@@ -27,14 +27,36 @@ replaces them with measured numbers. The findings below are about
 | P4 | is warm residency a placement input? | a 25-unit cold start does not move ASR off the LAN box at these costs; it is on the table for the measured ones |
 | P5 | where did my data go? | under `open`, nine strips touched the cloud; under `no-model-egress`, **none** — derived from the plan record, not from trusting the runtime |
 | P6 | is the plan re-verifiable? | honest plan passes; a forged policy hash and a halved cost summary are both caught from content |
+| P7 | CPU→GPU→CPU on one machine | node costs alone bounce (19.6, 2 crossings); with `pingpong ×4` the plan **restructures** — decode moves onto the GPU so data enters once and leaves once (21.8, 1 crossing, +4 compute); the naive plan scored under the judged policy would cost 35.0, and the plan names every heuristic it would have paid |
+| P8 | the same graph under three biases | latency-weighted: LAN box; energy-weighted (on battery): cloud, 480 J vs 160 kJ at +120 s; money-weighted: own hardware. Every dimension reported, so the trade-off is visible, not folded away |
+
+## The cost model (P7–P8)
+
+Founder, 2026-08-29: nodes and edges both cost, in several dimensions, and
+edge costs compound. So costs are vectors (latency, energy, money) folded
+by the policy's weights — the *biases* — memory is a capacity constraint,
+boundary kind (`bus` / `lan` / `wan`) is derived from where executors are
+and priced fixed-plus-per-byte, and compound effects are **heuristics
+declared as data** on the policy: `pingpong` (data leaves an executor and
+comes back, at any distance — the return crossing pays a multiple) and
+`pipeline_fill_flush` (every crossing touching a pipelined accelerator pays
+a fill or flush). Every heuristic is a penalty, never a bonus, so
+branch-and-bound's lower bound holds. The plan reports which fired and
+where. Judgment declared once; then algorithmic.
+
+What P7 caught that the tests had not: the first ping-pong detector looked
+two hops back, and the naive plan's round trip spanned three edges
+(cpu → gpu → gpu → cpu), so it never fired. "Leave and come back" is a
+property of ancestry, not of adjacency — the detector now walks it.
 
 ## What the bench taught
 
-**Data locality is a placement constraint, not a cost.** The first run
+**Data locality is both a constraint and a cost.** The first run
 collapsed every scenario onto one executor, because nothing said the
-media file lives on the device. `Job.pinned_to` fixed that, and the pin's
-reason appears on every other executor's exclusion — the plan says why
-the crossing was unavoidable.
+media file lives on the device. `Job.pinned_to` fixed that — the
+infinite-cost case, with the pin's reason on every other executor's
+exclusion — and the general case is bytes × the boundary's per-byte
+price, which the cost model now carries.
 
 **Per-node binding is blind, not merely greedy.** Its crossing count is
 constant across the sweep because crossings are not in its objective at

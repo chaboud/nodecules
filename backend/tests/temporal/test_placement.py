@@ -13,6 +13,11 @@ from nodecules.core.descriptions import (
     run_assay,
 )
 from nodecules.core.placement import (
+    HEURISTICS,
+    BoundaryPrice,
+    CostVector,
+    Edge,
+    boundary_kind,
     Executor,
     Job,
     Placement,
@@ -220,3 +225,140 @@ class TestTheArtifact:
         cyclic = graph.model_copy(update={"edges": graph.edges + (("C", "A"),)})
         with pytest.raises(ValueError, match="cycle"):
             plan(cyclic, execs, specs, assays, Policy())
+
+
+# --- The cost model: vectors, biases, boundary kinds, compound heuristics ------
+
+
+def _same_host_pair():
+    """A -> B -> C on one host: a CPU executor and a pipelined GPU executor.
+    The GPU is far cheaper for B alone; the bus between them is cheap."""
+    descs, specs, assays = _world(["a", "b", "c"])
+    graph = PlacementGraph(graph_id="pp", jobs=(
+        Job(node_id="A", description=descs["a"]),
+        Job(node_id="B", description=descs["b"]),
+        Job(node_id="C", description=descs["c"]),
+    ), edges=(Edge(source="A", target="B", bytes=1e6), Edge(source="B", target="C", bytes=1e6)))
+    cpu = Executor(executor_id="cpu", locality="on-device", host="air", device="cpu",
+                   claims=_claims(descs, ["a", "b", "c"]), cost={"ref.a": 1.0, "ref.b": 10.0, "ref.c": 1.0})
+    gpu = Executor(executor_id="gpu", locality="on-device", host="air", device="gpu", pipelined=True,
+                   claims=_claims(descs, ["a", "b", "c"]), cost={"ref.a": 4.0, "ref.b": 1.0, "ref.c": 4.0})
+    return graph, (cpu, gpu), specs, assays, descs
+
+
+class TestCostModel:
+    def test_boundary_kind_is_derived_from_where_executors_are(self) -> None:
+        graph, (cpu, gpu), *_ = _same_host_pair()
+        lan_box = Executor(executor_id="box", locality="lan", host="box")
+        cloud = Executor(executor_id="cloud", locality="cloud")
+        assert boundary_kind(cpu, gpu) == "bus"
+        assert boundary_kind(cpu, lan_box) == "lan"
+        assert boundary_kind(lan_box, cloud) == "wan"
+
+    def test_bytes_cross_at_the_boundary_price(self) -> None:
+        graph, execs, specs, assays, _ = _same_host_pair()
+        policy = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=0.5),
+                                                       per_byte=CostVector(latency=1e-6, energy=2e-6))})
+        cpu, gpu = execs
+        kind, cost = policy.crossing(cpu, gpu, 1e6)
+        assert kind == "bus"
+        assert cost == CostVector(latency=1.5, energy=2.0)
+
+    def test_scalar_costs_still_mean_latency(self) -> None:
+        graph, (x, y), specs, assays, _ = _chain()
+        assert x.cost_of("ref.b") == CostVector(latency=10.0)
+
+    def test_weights_are_the_biases_that_flip_a_plan(self) -> None:
+        # Y is faster but power-hungry; X is slow and frugal. A phone weighs
+        # energy, a datacenter weighs latency — same graph, two plans.
+        descs, specs, assays = _world(["a"])
+        graph = PlacementGraph(graph_id="one", jobs=(Job(node_id="A", description=descs["a"]),))
+        x = Executor(executor_id="X", locality="on-device", claims=_claims(descs, ["a"]),
+                     cost={"ref.a": CostVector(latency=10.0, energy=1.0)})
+        y = Executor(executor_id="Y", locality="lan", claims=_claims(descs, ["a"]),
+                     cost={"ref.a": CostVector(latency=2.0, energy=20.0)})
+        datacenter = plan(graph, (x, y), specs, assays, Policy(weights={"latency": 1.0})).plan
+        phone = plan(graph, (x, y), specs, assays, Policy(weights={"latency": 1.0, "energy": 5.0})).plan
+        assert datacenter.executor_of("A") == "Y" and phone.executor_of("A") == "X"
+        assert phone.compute == CostVector(latency=10.0, energy=1.0)
+        assert phone.objective == pytest.approx(15.0)
+
+    def test_memory_capacity_is_a_constraint_with_a_reason(self) -> None:
+        descs, specs, assays = _world(["a"])
+        big = Job(node_id="A", description=descs["a"], memory_bytes=12e9)
+        small = Executor(executor_id="S", locality="on-device", claims=_claims(descs, ["a"]),
+                         cost={"ref.a": 1.0}, memory_bytes=8e9)
+        admitted, excluded = candidates(big, (small,), specs, assays, Policy())
+        assert admitted == {} and "8e+09" in excluded["S"] and "1.2e+10" in excluded["S"]
+
+    def test_without_heuristics_the_plan_pingpongs(self) -> None:
+        graph, execs, specs, assays, _ = _same_host_pair()
+        policy = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=1.0))})
+        p = plan(graph, execs, specs, assays, policy).plan
+        assert [a.executor_id for a in p.assignments] == ["cpu", "gpu", "cpu"]
+        assert p.crossings == 2 and p.objective == pytest.approx(1 + 1 + 1 + 1 + 1)
+        assert p.heuristic_hits == ()
+
+    def test_pingpong_heuristic_keeps_the_chain_together_and_says_so(self) -> None:
+        graph, execs, specs, assays, _ = _same_host_pair()
+        policy = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=1.0))},
+                        heuristics={"pingpong": 8.0})
+        p = plan(graph, execs, specs, assays, policy).plan
+        # Not "everything on one executor": the heuristic forbids *bouncing*,
+        # not crossing. One crossing into the GPU and staying there (1+1+4+1)
+        # beats all-GPU (4+1+4) and beats the round trip.
+        assert [a.executor_id for a in p.assignments] == ["cpu", "gpu", "gpu"]
+        assert p.crossings == 1 and p.objective == pytest.approx(7.0)
+        assert p.heuristic_hits == ()
+        # And the bouncing plan, verified under the same policy, shows the hit.
+        bounced = plan(graph, execs, specs, assays,
+                       policy.model_copy(update={"heuristics": {}})).plan
+        ev_hit = plan(graph, execs, specs, assays, policy, method="per-node").plan
+        assert [a.executor_id for a in ev_hit.assignments] == ["cpu", "gpu", "cpu"]
+        assert ev_hit.heuristic_hits[0].name == "pingpong"
+        assert ev_hit.heuristic_hits[0].nodes == ("A", "B", "C")
+        assert ev_hit.heuristic_cost == pytest.approx(1 * (8.0 - 1))  # the return crossing, x(factor-1)
+        assert bounced.objective < ev_hit.objective  # same assignment, the heuristic is the difference
+
+    def test_pingpong_fires_at_any_distance(self) -> None:
+        # A -> B -> C -> D with A and D on cpu, B and C on gpu: the return
+        # crossing C -> D completes a round trip that started two hops up.
+        descs, specs, assays = _world(["a", "b", "c", "d"])
+        graph = PlacementGraph(graph_id="long", jobs=tuple(Job(node_id=n.upper(), description=descs[n]) for n in "abcd"),
+                               edges=(("A", "B"), ("B", "C"), ("C", "D")))
+        cpu = Executor(executor_id="cpu", locality="on-device", host="h", claims=_claims(descs, list("abcd")),
+                       cost={"ref.a": 1.0, "ref.b": 10.0, "ref.c": 10.0, "ref.d": 1.0})
+        gpu = Executor(executor_id="gpu", locality="on-device", host="h", device="gpu", claims=_claims(descs, list("abcd")),
+                       cost={"ref.a": 5.0, "ref.b": 1.0, "ref.c": 1.0, "ref.d": 5.0})
+        policy = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=1.0))}, heuristics={"pingpong": 3.0})
+        naive = plan(graph, (cpu, gpu), specs, assays, policy, method="per-node").plan
+        assert [a.executor_id for a in naive.assignments] == ["cpu", "gpu", "gpu", "cpu"]
+        assert [h.nodes for h in naive.heuristic_hits] == [("A", "C", "D")]
+        assert naive.heuristic_cost == pytest.approx(2.0)
+
+    def test_pipeline_fill_flush_charges_each_crossing_touching_the_gpu(self) -> None:
+        graph, execs, specs, assays, _ = _same_host_pair()
+        policy = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=1.0))},
+                        heuristics={"pipeline_fill_flush": 3.0})
+        p = plan(graph, execs, specs, assays, policy, method="per-node").plan
+        names = [h.name for h in p.heuristic_hits]
+        assert names == ["pipeline_fill_flush", "pipeline_fill_flush"]
+        assert p.heuristic_cost == pytest.approx(6.0)
+
+    def test_unknown_heuristic_is_refused(self) -> None:
+        graph, execs, specs, assays, _ = _chain()
+        with pytest.raises(ValueError, match="unknown heuristic"):
+            plan(graph, execs, specs, assays, Policy(heuristics={"vibes": 1.0}))
+        assert set(HEURISTICS) == {"pingpong", "pipeline_fill_flush"}
+
+    def test_verify_recomputes_heuristics_and_objective(self) -> None:
+        graph, execs, specs, assays, _ = _same_host_pair()
+        policy = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=1.0))},
+                        heuristics={"pingpong": 8.0})
+        p = plan(graph, execs, specs, assays, policy, method="per-node").plan
+        ok, why = verify_plan(p, graph, execs, policy)
+        assert ok, why
+        quiet = p.model_copy(update={"heuristic_cost": 0.0, "objective": p.objective - p.heuristic_cost})
+        assert verify_plan(quiet, graph, execs, policy)[0] is False
+        no_hits = p.model_copy(update={"heuristic": CostVector()})
+        assert verify_plan(no_hits, graph, execs, policy)[0] is False

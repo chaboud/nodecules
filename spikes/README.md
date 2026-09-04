@@ -98,7 +98,12 @@ python3 bench.py      # six experiments, P1-P6
 | P4 | is warm residency an input? | yes; at these costs it does not move ASR |
 | P5 | where did my data go? | nine strips touch the cloud under `open`, none under `no-model-egress` — from the plan record |
 | P6 | is the plan re-verifiable? | forged policy and forged cost both caught |
+| P7 | CPU→GPU→CPU on one machine | node costs alone bounce; with the `pingpong` heuristic the plan **restructures** to enter the GPU once; the naive plan would pay 35.0 vs 26.8 under the judged policy |
+| P8 | same graph, three biases | latency → LAN box; energy → cloud (480 J vs 160 kJ); money → own hardware. All dimensions reported |
 
-Costs are illustrative (HARDWARE-TODO H10 replaces them). The lesson that
-was not planned: data locality is a constraint, not a cost — without
-pinning decode to the device, every scenario collapsed onto one executor.
+Costs are illustrative (HARDWARE-TODO H10 replaces them). Two lessons that
+were not planned: data locality is both a constraint (the pin) and a cost
+(bytes at the boundary's price) — without pinning decode to the device,
+every scenario collapsed onto one executor; and a ping-pong is a property
+of ancestry, not adjacency — the two-hop detector missed a three-edge
+round trip until P7 ran.

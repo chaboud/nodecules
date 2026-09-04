@@ -131,6 +131,88 @@ def p6_the_artifact() -> None:
     print(f"\n  a reason, verbatim: {a.reason}")
 
 
+def p7_pingpong() -> None:
+    hdr(7, "CPU -> GPU -> CPU on one machine: fastest node-by-node, worst in practice",
+        "founder 2026-08-29: edge costs compound; heuristics are declared data")
+    from nodecules.core.descriptions import Description, ProducedStrip, SatisfiesClaim, Tolerance, run_assay
+    from nodecules.core.placement import BoundaryPrice, CostVector, Edge, Executor, Job, PlacementGraph, Policy
+    from nodecules.core.types import NodeSpec
+
+    # A frame pipeline on the Air: decode -> denoise -> detect -> track -> encode.
+    # The GPU is far better at denoise and detect; the CPU at the rest.
+    stages = ["decode", "denoise", "detect", "track", "encode"]
+    descs, specs, assays = {}, {}, {}
+    for st in stages:
+        d = Description(name=f"{st}/v1", consumes=(), produces=(ProducedStrip(strip_name=f"strips/{st}", schema_id="S"),),
+                        tolerance=Tolerance(metric="max_abs", max_value=0.0), reference=f"ref.{st}")
+        descs[st] = d
+        specs[f"ref.{st}"] = NodeSpec(node_type=f"ref.{st}", display_name=st, description="", writes_strips=[f"strips/{st}"])
+        assays[f"ref.{st}"] = run_assay(d, f"ref.{st}", [], [], n_probes=1, probe_provenance="fresh-drawn", declared_deterministic=True)
+    claims = lambda: tuple(SatisfiesClaim(realization=f"ref.{st}", description_hash=descs[st].content_hash(), claimant="b") for st in stages)
+    graph = PlacementGraph(graph_id="frames", jobs=tuple(Job(node_id=st, description=descs[st]) for st in stages),
+                           edges=tuple(Edge(source=a, target=b, bytes=8e6) for a, b in zip(stages, stages[1:])))
+    cpu = Executor(executor_id="cpu", locality="on-device", host="air", device="cpu", claims=claims(),
+                   cost={"ref.decode": 2, "ref.denoise": 30, "ref.detect": 40, "ref.track": 3, "ref.encode": 4})
+    gpu = Executor(executor_id="gpu", locality="on-device", host="air", device="gpu", pipelined=True, claims=claims(),
+                   cost={"ref.decode": 6, "ref.denoise": 3, "ref.detect": 4, "ref.track": 9, "ref.encode": 12})
+    base = Policy(boundary={"bus": BoundaryPrice(fixed=CostVector(latency=1.0), per_byte=CostVector(latency=1e-7))})
+
+    def run(label, pol, method="region"):
+        p = plan(graph, (cpu, gpu), specs, assays, pol, method=method).plan
+        path = " -> ".join(f"{a.node_id}@{a.executor_id}" for a in p.assignments)
+        print(f"  {label:28s} objective {p.objective:7.1f}  (compute {p.compute_cost:5.1f}, boundary {p.boundary_cost:5.1f}, "
+              f"heuristics {p.heuristic_cost:5.1f}, {p.crossings} crossings)")
+        print(f"      {path}")
+        for h in p.heuristic_hits:
+            print(f"      fired: {h.name} on {'->'.join(h.nodes)}  +{h.penalty.latency:.1f}")
+        return p
+
+    naive = run("node costs only", base)
+    pp = run("+ pingpong x4", base.model_copy(update={"heuristics": {"pingpong": 4.0}}))
+    both = run("+ pingpong x4 + fill/flush 5", base.model_copy(update={"heuristics": {"pingpong": 4.0, "pipeline_fill_flush": 5.0}}))
+    judged = plan(graph, (cpu, gpu), specs, assays,
+                  base.model_copy(update={"heuristics": {"pingpong": 4.0, "pipeline_fill_flush": 5.0}}), method="per-node").plan
+    print(f"\n  the naive plan, scored under the judged policy: objective {judged.objective:.1f} "
+          f"vs the judged plan's {both.objective:.1f} — the hits it would have paid:")
+    for h in judged.heuristic_hits:
+        print(f"      {h.name} on {'->'.join(h.nodes)}  +{h.penalty.latency:.1f}")
+    print("\n  => the heuristics are data on the policy; the optimiser applies them and")
+    print("     the plan names every one that fired. Judgment declared once, then algorithmic.")
+
+
+def p8_biases() -> None:
+    hdr(8, "Weighting biases: the same graph on a phone and in a datacenter",
+        "founder 2026-08-29: weighting biases drive decisions; executors.md cost classes")
+    from nodecules.core.placement import CostVector, Policy
+    execs = f.executors()
+    # Give the illustrative executors energy and money per node-second: the
+    # Air sips power and costs nothing; the LAN box burns watts; the cloud
+    # bills. (Illustrative, like everything else here.)
+    def energised(ex, watts, dollars_per_s):
+        cost = {}
+        for r, v in ex.cost.items():
+            lat = v if isinstance(v, (int, float)) else v.latency
+            cost[r] = CostVector(latency=lat, energy=lat * watts, money=lat * dollars_per_s)
+        return ex.model_copy(update={"cost": cost})
+    mba, spark, cloud = execs
+    execs2 = (energised(mba, 8.0, 0.0), energised(spark, 400.0, 0.0), energised(cloud, 0.0, 0.002))
+    pins = {"decode": "mba"}
+    for label, weights in (("datacenter: latency", {"latency": 1.0}),
+                           ("on battery: energy", {"latency": 0.02, "energy": 1.0}),
+                           ("on a budget: money", {"latency": 0.02, "money": 5000.0})):
+        pol = Policy(lock_level="open", boundary_cost=f.BOUNDARY, weights=weights)
+        p = plan(G, execs2, f.SPECS, f.ASSAYS, pol).plan
+        by_ex: dict = {}
+        for a in p.assignments:
+            by_ex.setdefault(a.executor_id, []).append(a.node_id)
+        print(f"  {label:22s} objective {p.objective:9.1f}   latency {p.compute.latency + p.boundary.latency:7.1f}s  "
+              f"energy {p.compute.energy:9.0f}J  money ${p.compute.money:6.2f}")
+        for ex, nodes in sorted(by_ex.items()):
+            print(f"      {ex:6s} {', '.join(nodes)}")
+    print("\n  => same graph, same executors, three plans. The bias is the policy's, and")
+    print("     the plan reports every dimension so the trade-off is visible, not folded away.")
+
+
 if __name__ == "__main__":
     p1_unsatisfiable()
     p2_region_vs_per_node()
@@ -138,4 +220,6 @@ if __name__ == "__main__":
     p4_warm_residency()
     p5_where_did_my_data_go()
     p6_the_artifact()
+    p7_pingpong()
+    p8_biases()
     print()

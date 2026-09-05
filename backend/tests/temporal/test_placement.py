@@ -435,6 +435,16 @@ class TestFrontAndObservations:
         assert disc[0].declared.latency == 1.0 and disc[0].ratio_latency == 3.0
         assert disc[1].declared.latency == pytest.approx(0.1) and disc[1].ratio_latency == pytest.approx(4.0)
 
+    def test_observation_rows_carry_raw_dimensions_for_a_reducer(self) -> None:
+        o = Observation(plan_hash="p", subject="asr", executor_id="mba", realization="r",
+                        measured=CostVector(latency=120.0, energy=960.0), source="air:2026-09-05",
+                        peak_memory_bytes=3.2e9, wall_seconds=131.0, temperature_c=71.5, throttled=True,
+                        concurrent_jobs=1, raw={"gpu_util": 0.82})
+        row = o.as_vector()
+        assert row["latency"] == 120.0 and row["peak_memory_bytes"] == 3.2e9
+        assert row["throttled"] == 1.0 and row["gpu_util"] == 0.82 and "money" in row
+        assert "bytes_moved" not in row  # absent stays absent; a reducer must not see zeros for unknowns
+
     def test_observations_are_decoration(self) -> None:
         assert "observations/" in DECORATION_NAMESPACES
         o = Observation(plan_hash="p", subject="A", executor_id="X", measured=CostVector(latency=1.0), source="s")

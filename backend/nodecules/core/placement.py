@@ -780,12 +780,37 @@ class Observation(BaseModel):
     subject: str = Field(min_length=1)  # a node_id, or "edge:<source>-><target>"
     executor_id: str = Field(min_length=1)
     realization: Optional[str] = None
-    measured: CostVector
+    measured: CostVector  # the three folded-for-planning dimensions
     source: str = Field(min_length=1)  # who measured, where, when — provenance
+    # Raw dimensions, un-folded — what a learned reducer (Least Volume
+    # Analysis, vault P-33) has to compress. Named fields for the ones every
+    # run should carry; `raw` for anything else a machine can report.
     peak_memory_bytes: Optional[float] = None
+    bytes_moved: Optional[float] = None       # across the boundary, for edge subjects
+    wall_seconds: Optional[float] = None      # end-to-end, distinct from measured.latency if it was CPU time
+    cpu_seconds: Optional[float] = None
+    temperature_c: Optional[float] = None     # at end of run, where readable
+    throttled: Optional[bool] = None          # thermal or power throttling observed
+    concurrent_jobs: Optional[int] = None     # contention on the executor during the run
+    raw: Dict[str, float] = Field(default_factory=dict)
 
     def content_hash(self) -> str:
         return _content_hash(self.model_dump(mode="json"))
+
+    def as_vector(self) -> Dict[str, float]:
+        """Every numeric dimension as one flat row — the input to a reducer."""
+        row: Dict[str, float] = {
+            "latency": self.measured.latency, "energy": self.measured.energy, "money": self.measured.money,
+        }
+        for name in ("peak_memory_bytes", "bytes_moved", "wall_seconds", "cpu_seconds",
+                     "temperature_c", "concurrent_jobs"):
+            v = getattr(self, name)
+            if v is not None:
+                row[name] = float(v)
+        if self.throttled is not None:
+            row["throttled"] = 1.0 if self.throttled else 0.0
+        row.update(self.raw)
+        return row
 
 
 class Discrepancy(BaseModel):

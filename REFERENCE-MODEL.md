@@ -7,11 +7,12 @@ v2 reference model; the working title "REFERENCE-MODEL" survives only as a
 filename.
 
 **Status:** Part I (the model) is design-only. Part II is design with
-four pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
+five pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
 access-pattern ADT — **PR-r2** (`ba9835a`) — the access-pattern
 resolver — **PR-d1** — descriptions and the satisfies judgment (§22b)
-— and **PR-d2** — placement, the plan as an artifact (§22c). The rest
-of Part II is unbuilt.
+— **PR-d2** — placement, the plan as an artifact (§22c) — and
+**PR-r3a** — the node store's declarative core (§9, §15, §16: manifests,
+CAS transactions, envelopes, residency). The rest of Part II is unbuilt.
 
 Seventh draft. v6 baked in **scope** as a first-class structural
 concept; v7 folds in **instance continuation / the settling spectrum**
@@ -301,6 +302,41 @@ otherwise-independent substrates.
 
 Implementation: HAMT (hash-array-mapped trie) per scope for v0.x;
 revisit if profiling demands B-tree packing.
+
+**Shipped as PR-r3a** (`core/pmap.py`, `core/store.py`; vault ADR-0023).
+What the slice fixed, beyond the bullets above:
+
+- **The trie's shape is a pure function of its key set.** Keys are
+  placed by sha256, not Python's salted hash, and a delete lifts a lone
+  leaf back up, so insert-then-delete leaves the trie exactly as fresh
+  insertion makes it. Two replicas holding the same content agree on
+  the same root hash without talking (the vault's P-26), and `diff`
+  costs the size of the change because shared subtrees are skipped by
+  hash.
+- **An id is a name; the content hash is the version.** A node's hash
+  covers kind + data + edges and excludes id and scope — those are
+  addresses (§13). Bodies are stored once by hash; two names bound to
+  the same content share one body. This settles §28's node-id question:
+  ids are opaque names with prefixing (`envelope:…`) as a convention.
+- **A manifest is a node whose `root` is the trie's Merkle hash.** The
+  root is content-only identity; the manifest's own content hash adds
+  `seq` and `parent` and is the version id — tree hash vs commit hash.
+- **Residency is store-side and never touches identity** (ADR-0018's
+  second condition). Pruning drops a body's *data* and keeps its
+  skeleton (kind + edges), so lineage and every composed hash survive
+  compaction; a read returns `Absent(rebuild_via=…)` or `Lost`, both
+  still saying what kind the node was and what it depended on.
+  `restore` re-admits bytes that hash to what the manifest says — a
+  replica fetch and a recompute are the same operation to the store.
+- **The composed hash (ADR-0003) is computable from manifests alone.**
+  It walks edges through the manifests a `Snapshot` holds — pinned
+  scopes read at the snapshot, unpinned scopes read live, which is the
+  `snapshot | latest` choice of §28 made by what the reader holds.
+- **Commits rebase when disjoint, conflict by name otherwise.** The
+  §22 claim that disjoint writes resolve trivially is now code: a
+  transaction whose base moved replays onto the live manifest when the
+  intervening diff shares no names with it, and raises `Conflict`
+  naming the overlap when it does.
 
 ## 10. Refcount-driven retention
 
@@ -936,12 +972,21 @@ stenota's real graph in `spikes/placement-bench/` (§22c). 18 tests.
 
 Unbuilt:
 
-### PR-r3: Node store substrate (per scope)
-HAMT-backed; wait-free reads; CAS atomic writes; sparse load.
-Per-scope manifest sequences; scope ids in node addressing.
-`get_node(scope, id) → Optional[Node] | Absent | Lost`.
-**Must be IIR-aware:** cells carry `(output, carried_state)` (§17).
-~1400 + 900 LOC.
+### PR-r3a: Node store — the declarative core — SHIPPED
+`core/pmap.py`: persistent HAMT, deterministic shape, Merkle root,
+structural diff. `core/store.py`: `Node` / `Edge`, `Manifest` (a node;
+root = trie hash), `Store` with wait-free `snapshot` / `get`
+(`Node | Absent | Lost | None`), per-scope CAS `Transaction` with
+disjoint-name rebase and `Conflict`, `make_envelope`, `prune` /
+`restore` as residency, `composed_hash`, `diff`, `history`. In-memory
+only. 38 tests. Design notes in §9.
+
+### PR-r3b: Node store — retention and disk
+Refcounts (system / user / in-flight / cross-reference) and per-kind
+retention curves (§10, §11) driving `prune`; sparse disk load (§12);
+resurrection through the generation engine. **Must be IIR-aware:**
+cells carry `(output, carried_state)` (§17) — a data convention the
+store is agnostic to until PR-r15 grounds it. ~900 LOC.
 
 ### PR-r4: Kind system
 First-class kinds. Schemas, retention, ref constraints, recipe
@@ -1067,10 +1112,10 @@ filter or a windowed Silero node is the likely first). ~250 +
   `_duration_ms_from_container` is a band-aid hierarchy over PyAV
   characteristics, explicitly labeled — it disappears when a
   `source.media` kind lands.
-- **Node id format.** Within-scope ids: kind-prefixed
-  (`envelope:strips/...`) or opaque? Per user input: kind is first-
-  class, so likely an opaque id + kind field, with prefixed naming
-  as a convention for human readability.
+- ~~**Node id format.**~~ Settled by PR-r3a: an id is an opaque name
+  within its scope, kind is a field, the content hash is the version,
+  and prefixed naming (`envelope:strips/...`, `manifest:<scope>#<seq>`)
+  is a human-readable convention the store's `envelope_id` follows.
 - **Path-dependent marker.** `settling_windows` carries finite K
   for settling nodes; it can't express K = ∞. Path-dependent nodes
   need a distinct marker — a sentinel value, or a companion
@@ -1084,8 +1129,10 @@ filter or a windowed Silero node is the likely first). ~250 +
   when PR-r15 grounds it.
 - **Cross-scope read consistency.** When a node in scope A reads
   from scope B, does it pin to B's manifest at the time of A's
-  read, or always read B's latest? Probably: explicit choice in
-  the edge spec (`consistency: snapshot | latest`).
+  read, or always read B's latest? PR-r3a's first cut puts the choice
+  on the *reader*, not the edge: a `Snapshot` pins the scopes it holds
+  and reads the rest live. Whether the edge should also be able to
+  demand one or the other stays open until a consumer needs it.
 - **Scope deletion.** Deleting a scope cascades to all its nodes.
   But cross-scope refs from other scopes still point in. Probably:
   refuse scope deletion if cross-scope refs exist, OR convert

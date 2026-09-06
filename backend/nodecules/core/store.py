@@ -39,6 +39,23 @@ The decisions this slice makes (vault ADR-0023):
   which is the P-24 answer ("what was the hash here" is always answerable).
 - **Decoration never bonds into functional nodes** (ADR-0022): a functional
   node whose edge targets a decoration namespace is refused at `put`.
+- **How many writers a scope admits is a labelled, versioned policy on its
+  manifest, not an assumption** (ADR-0007; founder, 2026-09-06: several
+  agents "partying in" one presentation graph must be able to share, swap,
+  and collaborate). `single-authority` refuses an overlapping commit and
+  names both versions; `last-writer-wins` lets it through and records what
+  it overrode on the manifest; `merge` folds the two versions through a
+  function registered for the node's kind (`register_merge`), which is the
+  slot a CRDT or an app-level join plugs into. Switching policy is itself a
+  commit, so history shows which semantics governed which version.
+- **The graph is a DAG per generation, and feedback crosses generations
+  explicitly.** An edge may pin a target *generation* (`Edge.at`, a
+  manifest hash): the reader sees the target as that manifest bound it, the
+  pin is part of the source node's identity, and a reference into an
+  earlier generation — a node reading its own previous output, or scope A
+  reading scope B reading an older A — is not a cycle. Only references
+  within one generation can form one, and those are refused. The manifest
+  sequence number is the generational boundary counter.
 
 Not in this slice, on purpose: refcounts and retention curves, kinds as a
 registry with schemas, the generation engine, indexes, markers, disk. The
@@ -51,7 +68,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from typing import Any, Dict, Iterator, List, Literal, Mapping, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Literal, Mapping, Optional, Set, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -63,6 +80,24 @@ MANIFEST_KIND = "manifest"
 ENVELOPE_KIND = "envelope"
 
 Residency = Literal["ram", "pruned"]
+Resolution = Literal["single-authority", "last-writer-wins", "merge"]
+RESOLUTIONS: Tuple[str, ...] = ("single-authority", "last-writer-wins", "merge")
+
+# (base, ours, theirs) -> merged. `base` is the version both sides started
+# from, or None if the name was new to both. Registered per node kind.
+MergeFn = Callable[[Optional["Node"], "Node", "Node"], "Node"]
+_MERGES: Dict[str, MergeFn] = {}
+
+
+def register_merge(kind: str, fn: MergeFn) -> None:
+    """Teach the store how two concurrent versions of a kind fold into one.
+    This is where a CRDT join, a set union, or an application's own rule
+    plugs in; the store never guesses."""
+    _MERGES[kind] = fn
+
+
+def get_merge(kind: str) -> Optional[MergeFn]:
+    return _MERGES.get(kind)
 
 
 def canonical_hash(payload: Any) -> str:
@@ -86,6 +121,7 @@ class Edge(BaseModel):
     scope: Optional[str] = None
     pattern: AccessPattern = Field(default_factory=AllPattern)
     role: str = ""
+    at: Optional[str] = None  # a manifest hash: read the target as that generation bound it
 
 
 class Node(BaseModel):
@@ -202,6 +238,9 @@ class Manifest(BaseModel):
     parent: Optional[str]
     root: str
     note: str = ""
+    resolution: Resolution = "single-authority"
+    resolution_version: int = 1
+    overrode: Tuple[Tuple[str, str], ...] = ()  # (name, hash that lost) under last-writer-wins
 
     _entries: PMap = PrivateAttr(default_factory=PMap)
 
@@ -214,8 +253,20 @@ class Manifest(BaseModel):
         seq: int,
         parent: Optional[str],
         note: str = "",
+        resolution: Resolution = "single-authority",
+        resolution_version: int = 1,
+        overrode: Tuple[Tuple[str, str], ...] = (),
     ) -> "Manifest":
-        m = cls(scope=scope, seq=seq, parent=parent, root=entries.root_hash, note=note)
+        m = cls(
+            scope=scope,
+            seq=seq,
+            parent=parent,
+            root=entries.root_hash,
+            note=note,
+            resolution=resolution,
+            resolution_version=resolution_version,
+            overrode=overrode,
+        )
         m._entries = entries
         return m
 
@@ -245,6 +296,9 @@ class Manifest(BaseModel):
                 "parent": self.parent,
                 "root": self.root,
                 "note": self.note,
+                "resolution": self.resolution,
+                "resolution_version": self.resolution_version,
+                "overrode": [list(o) for o in self.overrode],
             },
         )
 
@@ -274,12 +328,25 @@ class Snapshot:
 
 
 class Conflict(Exception):
-    """A CAS commit found the scope moved under it on names it also touched."""
+    """A commit found the scope moved under it on names it also touched, and
+    the scope's resolution policy did not fold them. `versions` names both
+    sides per name — (ours, theirs), either None for a delete — so a caller
+    can resolve by hand, retry, or record the fork."""
 
-    def __init__(self, scope: str, keys: Set[str]) -> None:
+    def __init__(
+        self,
+        scope: str,
+        versions: Dict[str, Tuple[Optional[str], Optional[str]]],
+        policy: str = "single-authority",
+    ) -> None:
         self.scope = scope
-        self.keys = frozenset(keys)
-        super().__init__(f"conflict in scope {scope!r} on {sorted(keys)}")
+        self.versions = dict(versions)
+        self.policy = policy
+        super().__init__(f"conflict in scope {scope!r} under {policy} on {sorted(versions)}")
+
+    @property
+    def keys(self) -> frozenset:
+        return frozenset(self.versions)
 
 
 class DanglingEdge(Exception):
@@ -342,6 +409,30 @@ class Store:
     def transaction(self, scope: str) -> "Transaction":
         return Transaction(self, scope, self.current(scope))
 
+    def set_resolution(self, scope: str, policy: Resolution, note: str = "") -> Manifest:
+        """Change how the scope folds concurrent writers. A commit of its
+        own, so the manifest history records which policy governed which
+        version (ADR-0007: labelled and versioned)."""
+        if policy not in RESOLUTIONS:
+            raise ValueError(f"unknown resolution policy {policy!r}; one of {RESOLUTIONS}")
+        with self._lock:
+            live = self.current(scope)
+            if live.resolution == policy:
+                return live
+            m = Manifest.build(
+                scope,
+                live._entries,
+                seq=live.seq + 1,
+                parent=live.content_hash(),
+                note=note or f"resolution: {live.resolution} -> {policy}",
+                resolution=policy,
+                resolution_version=live.resolution_version + 1,
+            )
+            self._admit(m.as_node())
+            self._manifests[m.content_hash()] = m
+            self._current[scope] = m
+            return m
+
     # -- reads -------------------------------------------------------------------
 
     def get(self, manifest: Manifest, node_id: str) -> Optional[Resolved]:
@@ -376,6 +467,20 @@ class Store:
     def resolve(self, snapshot: Snapshot, scope: str, node_id: str) -> Optional[Resolved]:
         return self.get(snapshot.manifest(scope), node_id)
 
+    def _manifest_for(self, snapshot: Snapshot, scope: str, at: Optional[str]) -> Manifest:
+        if at is None:
+            return snapshot.manifest(scope)
+        m = self._manifests.get(at)
+        if m is None or m.scope != scope:
+            raise DanglingEdge(f"{scope} has no generation {at[:12]}")
+        return m
+
+    def follow(self, snapshot: Snapshot, from_scope: str, edge: Edge) -> Optional[Resolved]:
+        """Read what an edge points at, honouring its scope and its
+        generation pin."""
+        scope = edge.scope or from_scope
+        return self.get(self._manifest_for(snapshot, scope, edge.at), edge.target)
+
     def composed_hash(self, snapshot: Snapshot, scope: str, node_id: str) -> str:
         """The two-layer identity of ADR-0003: a node's own content hash
         composed with the composed hashes of everything its edges reach, as
@@ -383,12 +488,14 @@ class Store:
         Needs manifests and skeletons only — pruned bodies still have
         identity. Walks iteratively: a strip of N windows whose every window
         reads the previous one is an N-deep chain, and N is unbounded."""
-        memo: Dict[Tuple[str, str], str] = {}
+        memo: Dict[Tuple[str, str, Optional[str]], str] = {}
         return self._composed(snapshot, scope, node_id, memo)
 
-    def _skeleton_at(self, snapshot: Snapshot, key: Tuple[str, str]) -> Tuple[str, Tuple[Edge, ...]]:
-        scope, node_id = key
-        manifest = snapshot.manifest(scope)
+    def _skeleton_at(
+        self, snapshot: Snapshot, key: Tuple[str, str, Optional[str]]
+    ) -> Tuple[str, Tuple[Edge, ...]]:
+        scope, node_id, at = key
+        manifest = self._manifest_for(snapshot, scope, at)
         own = manifest.hash_of(node_id)
         if own is None:
             raise DanglingEdge(f"{scope}:{node_id} is not bound in manifest seq {manifest.seq}")
@@ -400,32 +507,33 @@ class Store:
         snapshot: Snapshot,
         scope: str,
         node_id: str,
-        memo: Dict[Tuple[str, str], str],
+        memo: Dict[Tuple[str, str, Optional[str]], str],
     ) -> str:
-        root = (scope, node_id)
+        Key = Tuple[str, str, Optional[str]]
+        root: Key = (scope, node_id, None)
         if root in memo:
             return memo[root]
-        on_path: Set[Tuple[str, str]] = set()
-        stack: List[Tuple[Tuple[str, str], bool]] = [(root, False)]
+        on_path: Set[Key] = set()
+        stack: List[Tuple[Key, bool]] = [(root, False)]
         while stack:
             key, expanded = stack.pop()
             if key in memo:
                 continue
             own, edges = self._skeleton_at(snapshot, key)
+            children: List[Key] = [(e.scope or key[0], e.target, e.at) for e in edges]
             if not expanded:
                 on_path.add(key)
                 stack.append((key, True))
-                for e in edges:
-                    child = (e.scope or key[0], e.target)
+                for child in children:
                     if child in memo:
                         continue
                     if child in on_path:
-                        raise Cycle(f"{child[0]}:{child[1]} reaches itself")
+                        raise Cycle(f"{child[0]}:{child[1]} reaches itself within one generation")
                     stack.append((child, False))
             else:
                 parts = [
-                    (e.role, f"{e.scope or key[0]}:{e.target}", memo[(e.scope or key[0], e.target)])
-                    for e in edges
+                    (e.role, f"{c[0]}:{c[1]}@{c[2] or 'snapshot'}", memo[c])
+                    for e, c in zip(edges, children)
                 ]
                 memo[key] = canonical_hash({"self": own, "edges": parts})
                 on_path.discard(key)
@@ -477,24 +585,79 @@ class Store:
         with self._lock:
             live = self._current[tx.scope]
             base = tx.base
+            puts: Dict[str, Node] = dict(tx.puts)
+            overrode: List[Tuple[str, str]] = []
             if live is not base:
                 moved = pmap_diff(base._entries, live._entries).keys
                 overlap = moved & tx.touched
                 if overlap:
-                    raise Conflict(tx.scope, set(overlap))
+                    self._fold(tx, base, live, overlap, puts, overrode)
                 base = live
             entries = base._entries
-            for node_id, node in tx.puts.items():
+            for node_id, node in puts.items():
                 entries = entries.set(node_id, self._admit(node))
             for node_id in tx.deletes:
                 entries = entries.delete(node_id)
             manifest = Manifest.build(
-                tx.scope, entries, seq=base.seq + 1, parent=base.content_hash(), note=note
+                tx.scope,
+                entries,
+                seq=base.seq + 1,
+                parent=base.content_hash(),
+                note=note,
+                resolution=base.resolution,
+                resolution_version=base.resolution_version,
+                overrode=tuple(overrode),
             )
             self._admit(manifest.as_node())
             self._manifests[manifest.content_hash()] = manifest
             self._current[tx.scope] = manifest
             return manifest
+
+    def _fold(
+        self,
+        tx: "Transaction",
+        base: Manifest,
+        live: Manifest,
+        overlap: frozenset,
+        puts: Dict[str, Node],
+        overrode: List[Tuple[str, str]],
+    ) -> None:
+        """Apply the live manifest's resolution policy to the names both the
+        transaction and the intervening commits touched."""
+        policy = live.resolution
+
+        def versions(name: str) -> Tuple[Optional[str], Optional[str]]:
+            ours = puts[name].content_hash() if name in puts else None
+            return ours, live.hash_of(name)
+
+        if policy == "single-authority":
+            raise Conflict(tx.scope, {n: versions(n) for n in overlap}, policy)
+        if policy == "last-writer-wins":
+            for name in sorted(overlap):
+                theirs = live.hash_of(name)
+                if theirs is not None:
+                    overrode.append((name, theirs))
+            return
+        unresolved: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+        for name in sorted(overlap):
+            ours = puts.get(name)
+            theirs_h = live.hash_of(name)
+            theirs = self.get_by_hash(theirs_h) if theirs_h else None
+            if ours is None or theirs is None or ours.kind != theirs.kind:
+                unresolved[name] = versions(name)
+                continue
+            fn = get_merge(ours.kind)
+            if fn is None:
+                unresolved[name] = versions(name)
+                continue
+            base_h = base.hash_of(name)
+            base_node = self.get_by_hash(base_h) if base_h else None
+            merged = fn(base_node, ours, theirs)
+            if merged.id != name or merged.scope != tx.scope:
+                raise ValueError(f"merge for kind {ours.kind!r} returned a node named {merged.id!r} in {merged.scope!r}")
+            puts[name] = merged
+        if unresolved:
+            raise Conflict(tx.scope, unresolved, policy)
 
 
 class Transaction:
@@ -529,6 +692,14 @@ class Transaction:
                             f"{node.id!r} bonds to decoration {e.target!r}: functional nodes "
                             "may not cite claims, hallmarks, vouches, executors, plans, or observations"
                         )
+        for e in node.edges:
+            if e.at is not None:
+                m = self._store.manifest(e.at)
+                if m is None or m.scope != (e.scope or self.scope):
+                    raise ValueError(
+                        f"{node.id!r} pins {e.target!r} to generation {e.at[:12]}, which does not exist "
+                        f"in scope {(e.scope or self.scope)!r}; a pin can only name the past"
+                    )
         self.deletes.discard(node.id)
         self.puts[node.id] = node
         return node.content_hash()
@@ -551,6 +722,11 @@ class Transaction:
 __all__ = [
     "Absent",
     "Conflict",
+    "MergeFn",
+    "RESOLUTIONS",
+    "Resolution",
+    "get_merge",
+    "register_merge",
     "Cycle",
     "DanglingEdge",
     "ENVELOPE_KIND",

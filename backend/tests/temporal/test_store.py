@@ -6,6 +6,7 @@ import pytest
 
 from nodecules.core.store import (
     ENVELOPE_KIND,
+    register_merge,
     MANIFEST_KIND,
     Absent,
     Conflict,
@@ -231,6 +232,173 @@ def test_put_after_delete_in_one_transaction_is_a_put():
     m = tx.commit()
     got = store.get(m, "audio.wav")
     assert isinstance(got, Node) and got.data == {"path": "replacement.wav"}
+
+
+def test_conflict_names_both_versions():
+    store = Store()
+    _cooked(store)
+    t1, t2 = store.transaction(M), store.transaction(M)
+    t1.put(_asr(n=5))
+    t2.put(_asr(n=6))
+    t1.commit()
+    with pytest.raises(Conflict) as ei:
+        t2.commit()
+    ours, theirs = ei.value.versions["strips/asr/segments"]
+    assert ours == _asr(n=6).content_hash() and theirs == _asr(n=5).content_hash()
+    assert ei.value.policy == "single-authority"
+
+
+# --- resolution policy: several writers on one scope ---------------------------------
+
+
+def test_resolution_is_a_labelled_versioned_property_on_the_manifest():
+    store = Store()
+    g = store.current(M)
+    assert g.resolution == "single-authority" and g.resolution_version == 1
+    assert g.as_node().data["resolution"] == "single-authority"
+    m = store.set_resolution(M, "last-writer-wins")
+    assert (m.seq, m.resolution, m.resolution_version) == (1, "last-writer-wins", 2)
+    assert m.parent == g.content_hash() and m.root == g.root  # same content, new policy
+    assert store.set_resolution(M, "last-writer-wins") is m  # idempotent
+    with pytest.raises(ValueError):
+        store.set_resolution(M, "consensus-by-vibes")  # type: ignore[arg-type]
+    # a later ordinary commit carries the policy forward unchanged
+    tx = store.transaction(M)
+    tx.put(_audio())
+    m2 = tx.commit()
+    assert (m2.resolution, m2.resolution_version) == ("last-writer-wins", 2)
+
+
+def test_last_writer_wins_lets_the_commit_through_and_records_what_it_overrode():
+    store = Store()
+    _cooked(store)
+    store.set_resolution(M, "last-writer-wins")
+    t1, t2 = store.transaction(M), store.transaction(M)
+    t1.put(_asr(n=5))
+    t2.put(_asr(n=6))
+    t1.commit()
+    m = t2.commit()
+    assert m.hash_of("strips/asr/segments") == _asr(n=6).content_hash()
+    assert m.overrode == (("strips/asr/segments", _asr(n=5).content_hash()),)
+    assert m.as_node().data["overrode"] == [["strips/asr/segments", _asr(n=5).content_hash()]]
+    # the loser is still a resident body: nothing was destroyed, only unbound
+    assert store.get_by_hash(_asr(n=5).content_hash()) is not None
+
+
+def test_merge_folds_two_concurrent_versions_through_the_kinds_registered_rule():
+    """Legos on a play table: two agents each add bricks to the same region
+    at once; the region's kind knows that bricks union."""
+
+    def union_bricks(base, ours, theirs):
+        seen = set(base.data["bricks"]) if base else set()
+        merged = list(base.data["bricks"]) if base else []
+        for side in (ours, theirs):
+            for b in side.data["bricks"]:
+                if b not in seen:
+                    seen.add(b)
+                    merged.append(b)
+        return Node(id=ours.id, kind=ours.kind, scope=ours.scope, data={"bricks": merged})
+
+    register_merge("play.region", union_bricks)
+    store = Store()
+    tx = store.transaction(M)
+    tx.put(Node(id="table/left", kind="play.region", scope=M, data={"bricks": ["red-2x4"]}))
+    tx.commit()
+    store.set_resolution(M, "merge")
+    kid_a, kid_b = store.transaction(M), store.transaction(M)
+    kid_a.put(Node(id="table/left", kind="play.region", scope=M, data={"bricks": ["red-2x4", "blue-1x2"]}))
+    kid_b.put(Node(id="table/left", kind="play.region", scope=M, data={"bricks": ["red-2x4", "green-2x2"]}))
+    kid_a.commit()
+    m = kid_b.commit()
+    got = store.get(m, "table/left")
+    assert isinstance(got, Node)
+    assert got.data["bricks"][0] == "red-2x4"  # the shared base first
+    assert set(got.data["bricks"]) == {"red-2x4", "blue-1x2", "green-2x2"}  # nobody's bricks lost
+    assert m.overrode == ()
+
+
+def test_merge_without_a_rule_for_the_kind_conflicts_with_both_versions_named():
+    store = Store()
+    _cooked(store)
+    store.set_resolution(M, "merge")
+    t1, t2 = store.transaction(M), store.transaction(M)
+    t1.put(_asr(n=5))
+    t2.put(_asr(n=6))
+    t1.commit()
+    with pytest.raises(Conflict) as ei:
+        t2.commit()
+    assert ei.value.policy == "merge"
+    assert ei.value.versions == {"strips/asr/segments": (_asr(n=6).content_hash(), _asr(n=5).content_hash())}
+
+
+# --- generations: feedback and cross-system loops cross a boundary explicitly ------
+
+
+def test_a_pinned_edge_reads_a_prior_generation_and_is_not_a_cycle():
+    """A node reading its own previous output: the edge pins the generation
+    it reads from, so the graph is still a DAG — per generation."""
+    store = Store()
+    tx = store.transaction(M)
+    tx.put(Node(id="w/state", kind="settling", scope=M, data={"gen": 0, "v": 1.0}))
+    m1 = tx.commit()
+    tx = store.transaction(M)
+    tx.put(
+        Node(
+            id="w/state",
+            kind="settling",
+            scope=M,
+            data={"gen": 1, "v": 0.9},
+            edges=(Edge(target="w/state", role="prev", at=m1.content_hash()),),
+        )
+    )
+    m2 = tx.commit()
+    snap = store.snapshot(M)
+    h = store.composed_hash(snap, M, "w/state")
+    prev = store.follow(snap, M, store.get(m2, "w/state").edges[0])
+    assert isinstance(prev, Node) and prev.data["gen"] == 0
+    # the pin is part of identity: the same body pinned to a different generation is a different node
+    tx = store.transaction(M)
+    tx.put(
+        Node(
+            id="w/state",
+            kind="settling",
+            scope=M,
+            data={"gen": 1, "v": 0.9},
+            edges=(Edge(target="w/state", role="prev", at=m2.content_hash()),),
+        )
+    )
+    m3 = tx.commit()
+    assert m3.hash_of("w/state") != m2.hash_of("w/state")
+    assert store.composed_hash(store.snapshot(M), M, "w/state") != h
+
+
+def test_cross_scope_loop_is_fine_across_generations_and_a_cycle_within_one():
+    store = Store()
+    tx = store.transaction(M)
+    tx.put(Node(id="a", kind="k", scope=M, data=0))
+    m_gen1 = tx.commit()
+    tx = store.transaction(LIB)
+    tx.put(Node(id="b", kind="k", scope=LIB, data=0, edges=(Edge(target="a", scope=M, at=m_gen1.content_hash()),)))
+    tx.commit()
+    tx = store.transaction(M)
+    tx.put(Node(id="a", kind="k", scope=M, data=1, edges=(Edge(target="b", scope=LIB),)))
+    tx.commit()
+    assert store.composed_hash(store.snapshot(M, LIB), M, "a")  # a -> b -> a@gen1: not a cycle
+    tx = store.transaction(LIB)
+    tx.put(Node(id="b", kind="k", scope=LIB, data=1, edges=(Edge(target="a", scope=M),)))  # unpinned
+    tx.commit()
+    with pytest.raises(Cycle):
+        store.composed_hash(store.snapshot(M, LIB), M, "a")
+
+
+def test_a_pin_can_only_name_the_past():
+    store = Store()
+    tx = store.transaction(M)
+    with pytest.raises(ValueError, match="only name the past"):
+        tx.put(Node(id="x", kind="k", scope=M, data=0, edges=(Edge(target="x", at="deadbeef" * 8),)))
+    other = store.current(LIB)
+    with pytest.raises(ValueError, match="only name the past"):
+        tx.put(Node(id="x", kind="k", scope=M, data=0, edges=(Edge(target="x", at=other.content_hash()),)))  # wrong scope
 
 
 # --- residency: prune, envelopes, restore ---------------------------------------

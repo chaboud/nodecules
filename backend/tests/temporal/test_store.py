@@ -391,6 +391,29 @@ def test_composed_hash_names_dangling_edges_and_cycles():
         store.composed_hash(store.snapshot(M), M, "x")
 
 
+def test_composed_hash_walks_a_chain_deeper_than_the_recursion_limit():
+    """A strip whose every window reads the previous one is an N-deep chain.
+    Found by a bench, not foresight: the first walk was recursive and died at
+    ~1,000. N is unbounded, so the walk must not be."""
+    import sys
+
+    depth = sys.getrecursionlimit() * 5
+    store = Store()
+    tx = store.transaction(M)
+    tx.put(Node(id="w/0", kind="window", scope=M, data={"i": 0}))
+    for i in range(1, depth):
+        tx.put(Node(id=f"w/{i}", kind="window", scope=M, data={"i": i}, edges=(Edge(target=f"w/{i-1}", role="prev"),)))
+    tx.commit()
+    snap = store.snapshot(M)
+    h = store.composed_hash(snap, M, f"w/{depth-1}")
+    assert h == store.composed_hash(snap, M, f"w/{depth-1}")
+    # a diamond and a shared tail resolve once each, not once per path
+    tx = store.transaction(M)
+    tx.put(Node(id="fan", kind="k", scope=M, data=0, edges=(Edge(target="w/10", role="a"), Edge(target="w/9", role="b"))))
+    m = tx.commit()
+    assert store.composed_hash(store.snapshot(M), M, "fan") != h
+
+
 # --- decoration direction ------------------------------------------------------
 
 

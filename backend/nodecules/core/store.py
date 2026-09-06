@@ -380,9 +380,20 @@ class Store:
         """The two-layer identity of ADR-0003: a node's own content hash
         composed with the composed hashes of everything its edges reach, as
         bound by the manifests the snapshot holds. This is the cache key.
-        Needs manifests only — pruned bodies still have identity."""
+        Needs manifests and skeletons only — pruned bodies still have
+        identity. Walks iteratively: a strip of N windows whose every window
+        reads the previous one is an N-deep chain, and N is unbounded."""
         memo: Dict[Tuple[str, str], str] = {}
-        return self._composed(snapshot, scope, node_id, memo, set())
+        return self._composed(snapshot, scope, node_id, memo)
+
+    def _skeleton_at(self, snapshot: Snapshot, key: Tuple[str, str]) -> Tuple[str, Tuple[Edge, ...]]:
+        scope, node_id = key
+        manifest = snapshot.manifest(scope)
+        own = manifest.hash_of(node_id)
+        if own is None:
+            raise DanglingEdge(f"{scope}:{node_id} is not bound in manifest seq {manifest.seq}")
+        _kind, edges = self._skeletons[own]  # present for every admitted identity
+        return own, edges
 
     def _composed(
         self,
@@ -390,29 +401,35 @@ class Store:
         scope: str,
         node_id: str,
         memo: Dict[Tuple[str, str], str],
-        visiting: Set[Tuple[str, str]],
     ) -> str:
-        key = (scope, node_id)
-        if key in memo:
-            return memo[key]
-        if key in visiting:
-            raise Cycle(f"{scope}:{node_id} reaches itself")
-        manifest = snapshot.manifest(scope)
-        own = manifest.hash_of(node_id)
-        if own is None:
-            raise DanglingEdge(f"{scope}:{node_id} is not bound in manifest seq {manifest.seq}")
-        _kind, edges = self._skeletons[own]  # present for every admitted identity
-        visiting.add(key)
-        parts: List[Tuple[str, str, str]] = []
-        for e in edges:
-            target_scope = e.scope or scope
-            parts.append(
-                (e.role, f"{target_scope}:{e.target}", self._composed(snapshot, target_scope, e.target, memo, visiting))
-            )
-        visiting.discard(key)
-        composed = canonical_hash({"self": own, "edges": parts})
-        memo[key] = composed
-        return composed
+        root = (scope, node_id)
+        if root in memo:
+            return memo[root]
+        on_path: Set[Tuple[str, str]] = set()
+        stack: List[Tuple[Tuple[str, str], bool]] = [(root, False)]
+        while stack:
+            key, expanded = stack.pop()
+            if key in memo:
+                continue
+            own, edges = self._skeleton_at(snapshot, key)
+            if not expanded:
+                on_path.add(key)
+                stack.append((key, True))
+                for e in edges:
+                    child = (e.scope or key[0], e.target)
+                    if child in memo:
+                        continue
+                    if child in on_path:
+                        raise Cycle(f"{child[0]}:{child[1]} reaches itself")
+                    stack.append((child, False))
+            else:
+                parts = [
+                    (e.role, f"{e.scope or key[0]}:{e.target}", memo[(e.scope or key[0], e.target)])
+                    for e in edges
+                ]
+                memo[key] = canonical_hash({"self": own, "edges": parts})
+                on_path.discard(key)
+        return memo[root]
 
     def diff(self, old: Manifest, new: Manifest) -> Diff:
         """Names added, removed, or re-bound between two manifests of one

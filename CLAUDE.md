@@ -27,7 +27,25 @@ introduce new placeholder names ("the primitive", "the substrate" as a proper
 noun). New mechanism names may draw on the chemistry family (valence = a
 kind's reference constraints, bond = typed edge, isomer = equivalent graph
 realization, polymer/monomer = strip/cell) alongside the committed metallurgy
-terms (ingot, casting, anneal, assay, hallmark).
+terms (ingot, casting, anneal, assay, hallmark). Plain words first: every
+such term appears next to its plain meaning the first time a page or
+docstring uses it (founder steer, 2026-09-06: "cut some of the esoterica").
+
+**What it must serve (founder, 2026-09-06).** Seven consumers, one
+substrate — the vault's `LLM_Wiki/primitive/consumers.md` carries the
+matrix. In the founder's order: generic software and LLM interaction
+systems that can self-modify and self-distribute; a better stenota (graphs
+that turn strips into other strips, for compact inference); a better
+keyhole; a better Alexa, or a shared play-space for several people and
+several LLMs at once; intelligent distribution of the compute and data
+under all of those; rentable inference on open-weights models with
+attestation, so those functions become commodities; and declarative
+inference services over models and data a provider does not share, classic
+API style. **A primitive that serves only one of these is a consumer
+feature and belongs in that consumer.** Don't over-focus on one subset;
+don't cut straight lines through the architecture — each abstraction here
+has a stated reason to exist, and the reason is usually a consumer that is
+not the one currently being grounded against.
 
 ## Branch map — read this first
 

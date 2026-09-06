@@ -331,74 +331,30 @@ def test_merge_without_a_rule_for_the_kind_conflicts_with_both_versions_named():
     assert ei.value.versions == {"strips/asr/segments": (_asr(n=6).content_hash(), _asr(n=5).content_hash())}
 
 
-# --- generations: feedback and cross-system loops cross a boundary explicitly ------
+# --- generations: a producer only ever reads the past --------------------------------
 
 
-def test_a_pinned_edge_reads_a_prior_generation_and_is_not_a_cycle():
-    """A node reading its own previous output: the edge pins the generation
-    it reads from, so the graph is still a DAG — per generation."""
+def test_staged_writes_are_invisible_until_commit_so_a_producer_only_reads_the_past():
+    """The generational boundary is the transaction's base snapshot. What a
+    producer stages is not in it, so a recipe can never read the output it
+    is producing — the DAG-per-generation property holds by construction,
+    with no pin on the declaration. Feedback ("the entry before mine") is
+    a distinct name in the past, which the deep-chain test above covers."""
     store = Store()
+    m0 = _cooked(store)
     tx = store.transaction(M)
-    tx.put(Node(id="w/state", kind="settling", scope=M, data={"gen": 0, "v": 1.0}))
+    tx.put(Node(id="w/1", kind="window", scope=M, data={"i": 1}, edges=(Edge(target="strips/asr/segments"),)))
+    assert store.get(tx.base, "w/1") is None  # staged, not visible
+    assert store.get(store.current(M), "w/1") is None
     m1 = tx.commit()
+    assert isinstance(store.get(m1, "w/1"), Node)
+    assert store.get(m0, "w/1") is None  # the old world stays old
+    # a reference that reaches itself within one snapshot is still a cycle
     tx = store.transaction(M)
-    tx.put(
-        Node(
-            id="w/state",
-            kind="settling",
-            scope=M,
-            data={"gen": 1, "v": 0.9},
-            edges=(Edge(target="w/state", role="prev", at=m1.content_hash()),),
-        )
-    )
-    m2 = tx.commit()
-    snap = store.snapshot(M)
-    h = store.composed_hash(snap, M, "w/state")
-    prev = store.follow(snap, M, store.get(m2, "w/state").edges[0])
-    assert isinstance(prev, Node) and prev.data["gen"] == 0
-    # the pin is part of identity: the same body pinned to a different generation is a different node
-    tx = store.transaction(M)
-    tx.put(
-        Node(
-            id="w/state",
-            kind="settling",
-            scope=M,
-            data={"gen": 1, "v": 0.9},
-            edges=(Edge(target="w/state", role="prev", at=m2.content_hash()),),
-        )
-    )
-    m3 = tx.commit()
-    assert m3.hash_of("w/state") != m2.hash_of("w/state")
-    assert store.composed_hash(store.snapshot(M), M, "w/state") != h
-
-
-def test_cross_scope_loop_is_fine_across_generations_and_a_cycle_within_one():
-    store = Store()
-    tx = store.transaction(M)
-    tx.put(Node(id="a", kind="k", scope=M, data=0))
-    m_gen1 = tx.commit()
-    tx = store.transaction(LIB)
-    tx.put(Node(id="b", kind="k", scope=LIB, data=0, edges=(Edge(target="a", scope=M, at=m_gen1.content_hash()),)))
-    tx.commit()
-    tx = store.transaction(M)
-    tx.put(Node(id="a", kind="k", scope=M, data=1, edges=(Edge(target="b", scope=LIB),)))
-    tx.commit()
-    assert store.composed_hash(store.snapshot(M, LIB), M, "a")  # a -> b -> a@gen1: not a cycle
-    tx = store.transaction(LIB)
-    tx.put(Node(id="b", kind="k", scope=LIB, data=1, edges=(Edge(target="a", scope=M),)))  # unpinned
+    tx.put(Node(id="loop", kind="k", scope=M, data=0, edges=(Edge(target="loop"),)))
     tx.commit()
     with pytest.raises(Cycle):
-        store.composed_hash(store.snapshot(M, LIB), M, "a")
-
-
-def test_a_pin_can_only_name_the_past():
-    store = Store()
-    tx = store.transaction(M)
-    with pytest.raises(ValueError, match="only name the past"):
-        tx.put(Node(id="x", kind="k", scope=M, data=0, edges=(Edge(target="x", at="deadbeef" * 8),)))
-    other = store.current(LIB)
-    with pytest.raises(ValueError, match="only name the past"):
-        tx.put(Node(id="x", kind="k", scope=M, data=0, edges=(Edge(target="x", at=other.content_hash()),)))  # wrong scope
+        store.composed_hash(store.snapshot(M), M, "loop")
 
 
 # --- residency: prune, envelopes, restore ---------------------------------------

@@ -48,14 +48,20 @@ The decisions this slice makes (vault ADR-0023):
   function registered for the node's kind (`register_merge`), which is the
   slot a CRDT or an app-level join plugs into. Switching policy is itself a
   commit, so history shows which semantics governed which version.
-- **The graph is a DAG per generation, and feedback crosses generations
-  explicitly.** An edge may pin a target *generation* (`Edge.at`, a
-  manifest hash): the reader sees the target as that manifest bound it, the
-  pin is part of the source node's identity, and a reference into an
-  earlier generation — a node reading its own previous output, or scope A
-  reading scope B reading an older A — is not a cycle. Only references
-  within one generation can form one, and those are refused. The manifest
-  sequence number is the generational boundary counter.
+- **Declarations stay symbolic; resolution happens at generation time.**
+  An edge names a target and a *pattern* (PR-r1's typed access patterns:
+  all, latest, a range — and, coming, relative forms such as "the entry
+  before mine" or "the last five minutes"). What a pattern resolved to —
+  which names, which generations, which hashes — is recorded in the
+  envelope and the cache key, never written back into the declaration. A
+  first cut pinned a manifest hash onto the edge and was withdrawn the
+  same day (founder, 2026-09-06: hard-pinning makes structural rigidity
+  viral — every advance of the target forces a rewrite of the reader and
+  of everything downstream). Acyclicity needs no pin: a producer reads
+  through the snapshot its transaction started from, which cannot contain
+  the output being produced, so the graph is a DAG per generation by
+  construction. Within one snapshot a reference that reaches back to
+  itself is a cycle and is refused.
 
 Not in this slice, on purpose: refcounts and retention curves, kinds as a
 registry with schemas, the generation engine, indexes, markers, disk. The
@@ -121,7 +127,6 @@ class Edge(BaseModel):
     scope: Optional[str] = None
     pattern: AccessPattern = Field(default_factory=AllPattern)
     role: str = ""
-    at: Optional[str] = None  # a manifest hash: read the target as that generation bound it
 
 
 class Node(BaseModel):
@@ -467,19 +472,12 @@ class Store:
     def resolve(self, snapshot: Snapshot, scope: str, node_id: str) -> Optional[Resolved]:
         return self.get(snapshot.manifest(scope), node_id)
 
-    def _manifest_for(self, snapshot: Snapshot, scope: str, at: Optional[str]) -> Manifest:
-        if at is None:
-            return snapshot.manifest(scope)
-        m = self._manifests.get(at)
-        if m is None or m.scope != scope:
-            raise DanglingEdge(f"{scope} has no generation {at[:12]}")
-        return m
-
     def follow(self, snapshot: Snapshot, from_scope: str, edge: Edge) -> Optional[Resolved]:
-        """Read what an edge points at, honouring its scope and its
-        generation pin."""
+        """Read what an edge points at, honouring its scope, through the
+        manifests the snapshot holds. Element-level patterns (which entries
+        of a strip) are the resolver's job, not the store's."""
         scope = edge.scope or from_scope
-        return self.get(self._manifest_for(snapshot, scope, edge.at), edge.target)
+        return self.get(snapshot.manifest(scope), edge.target)
 
     def composed_hash(self, snapshot: Snapshot, scope: str, node_id: str) -> str:
         """The two-layer identity of ADR-0003: a node's own content hash
@@ -488,14 +486,12 @@ class Store:
         Needs manifests and skeletons only — pruned bodies still have
         identity. Walks iteratively: a strip of N windows whose every window
         reads the previous one is an N-deep chain, and N is unbounded."""
-        memo: Dict[Tuple[str, str, Optional[str]], str] = {}
+        memo: Dict[Tuple[str, str], str] = {}
         return self._composed(snapshot, scope, node_id, memo)
 
-    def _skeleton_at(
-        self, snapshot: Snapshot, key: Tuple[str, str, Optional[str]]
-    ) -> Tuple[str, Tuple[Edge, ...]]:
-        scope, node_id, at = key
-        manifest = self._manifest_for(snapshot, scope, at)
+    def _skeleton_at(self, snapshot: Snapshot, key: Tuple[str, str]) -> Tuple[str, Tuple[Edge, ...]]:
+        scope, node_id = key
+        manifest = snapshot.manifest(scope)
         own = manifest.hash_of(node_id)
         if own is None:
             raise DanglingEdge(f"{scope}:{node_id} is not bound in manifest seq {manifest.seq}")
@@ -507,10 +503,10 @@ class Store:
         snapshot: Snapshot,
         scope: str,
         node_id: str,
-        memo: Dict[Tuple[str, str, Optional[str]], str],
+        memo: Dict[Tuple[str, str], str],
     ) -> str:
-        Key = Tuple[str, str, Optional[str]]
-        root: Key = (scope, node_id, None)
+        Key = Tuple[str, str]
+        root: Key = (scope, node_id)
         if root in memo:
             return memo[root]
         on_path: Set[Key] = set()
@@ -520,7 +516,7 @@ class Store:
             if key in memo:
                 continue
             own, edges = self._skeleton_at(snapshot, key)
-            children: List[Key] = [(e.scope or key[0], e.target, e.at) for e in edges]
+            children: List[Key] = [(e.scope or key[0], e.target) for e in edges]
             if not expanded:
                 on_path.add(key)
                 stack.append((key, True))
@@ -528,11 +524,11 @@ class Store:
                     if child in memo:
                         continue
                     if child in on_path:
-                        raise Cycle(f"{child[0]}:{child[1]} reaches itself within one generation")
+                        raise Cycle(f"{child[0]}:{child[1]} reaches itself")
                     stack.append((child, False))
             else:
                 parts = [
-                    (e.role, f"{c[0]}:{c[1]}@{c[2] or 'snapshot'}", memo[c])
+                    (e.role, f"{c[0]}:{c[1]}", memo[c])
                     for e, c in zip(edges, children)
                 ]
                 memo[key] = canonical_hash({"self": own, "edges": parts})
@@ -692,14 +688,6 @@ class Transaction:
                             f"{node.id!r} bonds to decoration {e.target!r}: functional nodes "
                             "may not cite claims, hallmarks, vouches, executors, plans, or observations"
                         )
-        for e in node.edges:
-            if e.at is not None:
-                m = self._store.manifest(e.at)
-                if m is None or m.scope != (e.scope or self.scope):
-                    raise ValueError(
-                        f"{node.id!r} pins {e.target!r} to generation {e.at[:12]}, which does not exist "
-                        f"in scope {(e.scope or self.scope)!r}; a pin can only name the past"
-                    )
         self.deletes.discard(node.id)
         self.puts[node.id] = node
         return node.content_hash()

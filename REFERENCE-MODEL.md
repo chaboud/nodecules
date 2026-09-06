@@ -205,17 +205,26 @@ project-scoped recipe template; a playground instance may reference
 a project-scoped example graph. The reference is explicit in the
 edge structure.
 
-**Generations, and the boundary feedback crosses (shipped 2026-09-06,
-`core/store.py`).** The graph is a DAG *per generation*. An edge may pin
-the generation it reads from (`Edge.at`, a manifest hash): the reader
-sees the target as that manifest bound it, the pin is part of the
-source node's identity, and a reference into an earlier generation is
-not a cycle — a node reading its own previous output, or scope A
-reading scope B reading an older A. Only references within one
-generation can form a cycle, and the store refuses those. A pin can only
-name the past. The manifest sequence number is the generational
-boundary counter; `SelfPrevious` (PR-r15) is the *relative* form of the
-same pin, still deferred until a settling node grounds it.
+**Generations, feedback, and why references stay symbolic (2026-09-06,
+revised the same day).** The graph is a DAG *per generation*. A producer
+reads through the snapshot its transaction started from, which cannot
+contain the output it is producing, so a node reading "the entry before
+mine" or "everything from five minutes ago to now" reads the past by
+construction — no cycle, no pin. Those relative and range-relative
+references are the construction mechanism (founder), and the four
+patterns PR-r1 cut because no stenota node used them (`Before` / `After`
+/ `OrdinalAt` / `OrdinalRange` / `SelfRelativeOrdinal`) were a
+stenota-shaped cut: they return, as symbolic patterns resolved at
+generation time, with what they resolved to — names, generations, hashes
+— recorded in the envelope and the cache key, never written back into
+the declaration. A first cut pinned a manifest hash onto the edge
+(`Edge.at`) and was withdrawn within hours: hard-pinning makes structural
+rigidity viral, because every advance of the target forces a rewrite of
+the reader and of everything downstream. The one non-viral pin is a
+reference to an immutable body by content hash (not built; nothing has
+needed it). `SelfPrevious` still ships bundled with its keep-last-K
+retention floor (§17, PR-r15): a relative read into pruned history is the
+O(N²) rebuild, so the shape and the floor arrive together.
 
 ## 6. Generation
 
@@ -1009,8 +1018,8 @@ only. 38 tests. Design notes in §9.
 clock domains with provenance, maps of measured anchors for skew and
 drift, exact-or-reported conversion. `core/store.py`: resolution policy
 on the manifest (`single-authority` / `last-writer-wins` / `merge` via
-`register_merge`), conflicts that name both versions, generation pins
-on edges (`Edge.at`). 18 tests.
+`register_merge`), conflicts that name both versions. A generation pin
+on edges was shipped and withdrawn the same day (§5). 16 tests.
 
 ### PR-r3b: Node store — retention and disk
 Refcounts (system / user / in-flight / cross-reference) and per-kind
@@ -1158,12 +1167,12 @@ filter or a windowed Silero node is the likely first). ~250 +
   sub-field (it travels with the output), but a separate node would
   let retention prune `output` while keeping `carried_state`. TBD
   when PR-r15 grounds it.
-- ~~**Cross-scope read consistency.**~~ Settled 2026-09-06: both.
-  An edge that pins a generation (`Edge.at`) is `snapshot` by
-  construction and part of identity; an edge without a pin reads
-  through whatever manifest the reader's `Snapshot` holds for that
-  scope, or the live current if it holds none. Pinned is how feedback
-  and cross-system loops stay acyclic (§5).
+- ~~**Cross-scope read consistency.**~~ Settled 2026-09-06: the
+  reader's `Snapshot` decides — it pins the scopes it holds and reads
+  the rest live — and a producer's snapshot is its transaction's base.
+  An edge-level generation pin was tried and withdrawn the same day
+  (§5): declarations stay symbolic; the resolved generation lives in
+  the envelope.
 - **Scope deletion.** Deleting a scope cascades to all its nodes.
   But cross-scope refs from other scopes still point in. Probably:
   refuse scope deletion if cross-scope refs exist, OR convert

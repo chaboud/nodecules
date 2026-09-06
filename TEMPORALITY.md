@@ -41,6 +41,20 @@ class TimeRange(BaseModel):
 
 Times are integer milliseconds. No floats. No timezone-aware datetimes. Meeting-relative (t=0 at first sample of first input). Epoch timestamps are converted at ingest and at render, never mid-pipeline.
 
+**Generalised 2026-09-06, additively** (`core/timeline.py`, founder input:
+the domain and provenance of time are metadata; devices and media skew;
+milliseconds are not enough for every content type). A time is an integer
+count of ticks on a *named timeline* whose timebase is an exact rational —
+milliseconds are 1/1000, 100 ns "nanos" are 1/10,000,000, a 48 kHz sample
+clock is 1/48000, 29.97 fps is 1001/30000. The meeting timeline above is
+the 1/1000 case and every `_ms` field keeps meaning exactly what it did.
+Two timelines relate only through a `TimelineMap` of measured anchors with
+its own provenance and error bound; conversion is exact rational
+arithmetic that reports whether rounding was needed. Still no floats,
+still no epoch mid-pipeline: an epoch is just a timeline whose origin is
+`unix-epoch`, and you convert through a map, on purpose, where you can see
+it.
+
 ### `TimeSource`
 
 ```python

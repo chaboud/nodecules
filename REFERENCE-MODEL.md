@@ -205,6 +205,18 @@ project-scoped recipe template; a playground instance may reference
 a project-scoped example graph. The reference is explicit in the
 edge structure.
 
+**Generations, and the boundary feedback crosses (shipped 2026-09-06,
+`core/store.py`).** The graph is a DAG *per generation*. An edge may pin
+the generation it reads from (`Edge.at`, a manifest hash): the reader
+sees the target as that manifest bound it, the pin is part of the
+source node's identity, and a reference into an earlier generation is
+not a cycle — a node reading its own previous output, or scope A
+reading scope B reading an older A. Only references within one
+generation can form a cycle, and the store refuses those. A pin can only
+name the past. The manifest sequence number is the generational
+boundary counter; `SelfPrevious` (PR-r15) is the *relative* form of the
+same pin, still deferred until a settling node grounds it.
+
 ## 6. Generation
 
 Generation is one operation: **produce node X by running its recipe
@@ -470,6 +482,17 @@ generation pipeline. v0.y+: real two-phase commit if needed.
 
 A scheduler tick is naturally a per-scope transaction. Failures
 roll back by discarding the in-progress manifest.
+
+**Several writers on one scope (shipped 2026-09-06).** How overlapping
+commits fold is a labelled, versioned *resolution policy* carried on
+the manifest (vault ADR-0007), never an assumption: `single-authority`
+refuses and names both versions; `last-writer-wins` admits and records
+what it overrode; `merge` folds the versions through a function
+registered for the node's kind — the slot a CRDT join or an
+application rule plugs into. Changing policy is itself a commit.
+Disjoint-name commits rebase under every policy. Ownership leases, and
+per-region rather than per-scope policy, are the next two steps when a
+consumer needs them.
 
 ## 16. Pruning + resurrection (envelopes as rebuild slates)
 
@@ -981,6 +1004,14 @@ disjoint-name rebase and `Conflict`, `make_envelope`, `prune` /
 `restore` as residency, `composed_hash`, `diff`, `history`. In-memory
 only. 38 tests. Design notes in §9.
 
+### Founder inputs of 2026-09-06 — SHIPPED
+`core/timeline.py`: timebases as exact rationals, timelines as named
+clock domains with provenance, maps of measured anchors for skew and
+drift, exact-or-reported conversion. `core/store.py`: resolution policy
+on the manifest (`single-authority` / `last-writer-wins` / `merge` via
+`register_merge`), conflicts that name both versions, generation pins
+on edges (`Edge.at`). 18 tests.
+
 ### PR-r3b: Node store — retention and disk
 Refcounts (system / user / in-flight / cross-reference) and per-kind
 retention curves (§10, §11) driving `prune`; sparse disk load (§12);
@@ -1127,12 +1158,12 @@ filter or a windowed Silero node is the likely first). ~250 +
   sub-field (it travels with the output), but a separate node would
   let retention prune `output` while keeping `carried_state`. TBD
   when PR-r15 grounds it.
-- **Cross-scope read consistency.** When a node in scope A reads
-  from scope B, does it pin to B's manifest at the time of A's
-  read, or always read B's latest? PR-r3a's first cut puts the choice
-  on the *reader*, not the edge: a `Snapshot` pins the scopes it holds
-  and reads the rest live. Whether the edge should also be able to
-  demand one or the other stays open until a consumer needs it.
+- ~~**Cross-scope read consistency.**~~ Settled 2026-09-06: both.
+  An edge that pins a generation (`Edge.at`) is `snapshot` by
+  construction and part of identity; an edge without a pin reads
+  through whatever manifest the reader's `Snapshot` holds for that
+  scope, or the live current if it holds none. Pinned is how feedback
+  and cross-system loops stay acyclic (§5).
 - **Scope deletion.** Deleting a scope cascades to all its nodes.
   But cross-scope refs from other scopes still point in. Probably:
   refuse scope deletion if cross-scope refs exist, OR convert

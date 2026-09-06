@@ -78,7 +78,7 @@ instances that don't.
 - **Core types** — `backend/nodecules/core/types.py` (dataclasses: `NodeSpec`, `NodeData`, `EdgeData`, `GraphData`, `ExecutionContext`, `BaseNode`).
 - **Execution engine** — `backend/nodecules/core/executor.py` (Kahn's-algorithm topological sort, async, supports streaming).
 - **Temporal core** — `core/{time,temporal_context,node_cache,annotations,scheduler,strips,strip_access,strip_resolve,subscriptions,environment,cycle_validator,events}.py`. Tests under `backend/tests/temporal/` (pytest + pydantic only; no DB).
-- **Substrate core (nodecules v2)** — `core/descriptions.py` + `core/assay_metrics.py` (PR-d1), `core/placement.py` (PR-d2), `core/pmap.py` + `core/store.py` (PR-r3a: the node store — manifests, CAS transactions, envelopes, residency, composed hash). Same test tree, same no-DB rule.
+- **Substrate core (nodecules v2)** — `core/descriptions.py` + `core/assay_metrics.py` (PR-d1), `core/placement.py` (PR-d2), `core/pmap.py` + `core/store.py` (PR-r3a: the node store — manifests, CAS transactions with a per-scope resolution policy, generation pins on edges, envelopes, residency, composed hash), `core/timeline.py` (timebases, timelines, skew maps). Same test tree, same no-DB rule.
 - **Provider adapters (chat-shaped)** — `backend/nodecules/core/smart_context.py` with Ollama, Anthropic, Bedrock, Mock adapters. Used by chat nodes. The tool-aware abstraction is `core/llm_providers.py`.
 - **Content-addressable chat contexts** — `backend/nodecules/core/content_addressable_context.py`. Postgres-backed store keyed by `sha256(messages)[:16]`. This is a chat-message-history cache, **not** the general node-output cache (that is `core/node_cache.py`).
 - **Spikes** — `spikes/` holds throwaway design benches with measured findings. Not core, not imported by anything. See `spikes/README.md`.
@@ -98,7 +98,7 @@ instances that don't.
 machinery.** Its hard invariants, condensed:
 
 1. **Additive only.** `temporal_kind` defaults to `"static"`; every existing node, graph, and plugin keeps working unmodified.
-2. **Time is integer milliseconds, meeting-relative.** No floats. No Unix epoch mid-pipeline.
+2. **Time is integer ticks on a named timeline with an exact rational timebase** (`core/timeline.py`); the meeting timeline is 1/1000 and every `_ms` field keeps meaning milliseconds. No floats. No Unix epoch mid-pipeline — an epoch is a timeline you convert through a `TimelineMap`, visibly. Two clocks never compare without a map.
 3. **`TimeSource` is injected, not global.** Never call `time.time()` or `datetime.now()` in the scheduler or in temporal nodes.
 4. **Cache keys include `window_hash` and `annotation_hash` only for temporal nodes.** Static-node cache keys must produce the same hash they did before the branch.
 5. **Scheduler is single-threaded for now.** Correctness before concurrency.

@@ -46,8 +46,16 @@ The decisions this slice makes (vault ADR-0023):
   names both versions; `last-writer-wins` lets it through and records what
   it overrode on the manifest; `merge` folds the two versions through a
   function registered for the node's kind (`register_merge`), which is the
-  slot a CRDT or an app-level join plugs into. Switching policy is itself a
-  commit, so history shows which semantics governed which version.
+  slot a CRDT join, an OT transform, or an app-level rule plugs into.
+  Switching policy is itself a commit, so history shows which semantics
+  governed which version. Nobody waits (founder, 2026-09-07): work proceeds
+  against an old snapshot, the commit is the unpleasant surprise, and the
+  committer cleans house — `Transaction.rebase()` hands back (base, ours,
+  theirs) per contested name, the caller puts a resolution and commits, and
+  the manifest records who committed and what it was rebased from. Most
+  overlap never happens because write access rarely overlaps; where it
+  does, writers are trusted to be competent, and the manifest chain is
+  already a Merkle history that signed manifests would make a ledger.
 - **Declarations stay symbolic; resolution happens at generation time.**
   An edge names a target and a *pattern* (PR-r1's typed access patterns:
   all, latest, a range — and, coming, relative forms such as "the entry
@@ -243,6 +251,8 @@ class Manifest(BaseModel):
     parent: Optional[str]
     root: str
     note: str = ""
+    author: str = ""  # who committed; the first field of a ledger
+    rebased_from: Optional[str] = None  # the manifest this work was originally done against, if it moved
     resolution: Resolution = "single-authority"
     resolution_version: int = 1
     overrode: Tuple[Tuple[str, str], ...] = ()  # (name, hash that lost) under last-writer-wins
@@ -258,6 +268,8 @@ class Manifest(BaseModel):
         seq: int,
         parent: Optional[str],
         note: str = "",
+        author: str = "",
+        rebased_from: Optional[str] = None,
         resolution: Resolution = "single-authority",
         resolution_version: int = 1,
         overrode: Tuple[Tuple[str, str], ...] = (),
@@ -268,6 +280,8 @@ class Manifest(BaseModel):
             parent=parent,
             root=entries.root_hash,
             note=note,
+            author=author,
+            rebased_from=rebased_from,
             resolution=resolution,
             resolution_version=resolution_version,
             overrode=overrode,
@@ -301,6 +315,8 @@ class Manifest(BaseModel):
                 "parent": self.parent,
                 "root": self.root,
                 "note": self.note,
+                "author": self.author,
+                "rebased_from": self.rebased_from,
                 "resolution": self.resolution,
                 "resolution_version": self.resolution_version,
                 "overrode": [list(o) for o in self.overrode],
@@ -333,21 +349,25 @@ class Snapshot:
 
 
 class Conflict(Exception):
-    """A commit found the scope moved under it on names it also touched, and
-    the scope's resolution policy did not fold them. `versions` names both
-    sides per name — (ours, theirs), either None for a delete — so a caller
-    can resolve by hand, retry, or record the fork."""
+    """The unpleasant surprise: a commit found the scope moved under it on
+    names it also touched, and the scope's resolution policy did not fold
+    them. `versions` is name → (base, ours, theirs) content hashes, None
+    where a side deleted or never bound the name; `authors` is name → who
+    committed theirs. Clean house with `Transaction.rebase()`."""
 
     def __init__(
         self,
         scope: str,
-        versions: Dict[str, Tuple[Optional[str], Optional[str]]],
+        versions: Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]],
         policy: str = "single-authority",
+        authors: Optional[Dict[str, str]] = None,
     ) -> None:
         self.scope = scope
         self.versions = dict(versions)
         self.policy = policy
-        super().__init__(f"conflict in scope {scope!r} under {policy} on {sorted(versions)}")
+        self.authors = dict(authors or {})
+        who = ", ".join(f"{n} ({self.authors[n]})" if self.authors.get(n) else n for n in sorted(versions))
+        super().__init__(f"conflict in scope {scope!r} under {policy} on {who}")
 
     @property
     def keys(self) -> frozenset:
@@ -411,10 +431,23 @@ class Store:
             yield m
             m = self._manifests.get(m.parent) if m.parent else None
 
-    def transaction(self, scope: str) -> "Transaction":
-        return Transaction(self, scope, self.current(scope))
+    def transaction(self, scope: str, author: str = "") -> "Transaction":
+        return Transaction(self, scope, self.current(scope), author=author)
 
-    def set_resolution(self, scope: str, policy: Resolution, note: str = "") -> Manifest:
+    def blame(self, scope: str, name: str, since: Optional[Manifest] = None) -> Optional[Manifest]:
+        """The most recent manifest after `since` (or ever) that changed what
+        `name` is bound to — who did it and when. None if nothing did."""
+        floor = since.seq if since is not None else -1
+        m: Optional[Manifest] = self.current(scope)
+        while m is not None and m.seq > floor:
+            parent = self._manifests.get(m.parent) if m.parent else None
+            before = parent.hash_of(name) if parent is not None else None
+            if m.hash_of(name) != before:
+                return m
+            m = parent
+        return None
+
+    def set_resolution(self, scope: str, policy: Resolution, note: str = "", author: str = "") -> Manifest:
         """Change how the scope folds concurrent writers. A commit of its
         own, so the manifest history records which policy governed which
         version (ADR-0007: labelled and versioned)."""
@@ -430,6 +463,7 @@ class Store:
                 seq=live.seq + 1,
                 parent=live.content_hash(),
                 note=note or f"resolution: {live.resolution} -> {policy}",
+                author=author,
                 resolution=policy,
                 resolution_version=live.resolution_version + 1,
             )
@@ -600,6 +634,8 @@ class Store:
                 seq=base.seq + 1,
                 parent=base.content_hash(),
                 note=note,
+                author=tx.author,
+                rebased_from=tx.rebased_from,
                 resolution=base.resolution,
                 resolution_version=base.resolution_version,
                 overrode=tuple(overrode),
@@ -622,12 +658,20 @@ class Store:
         transaction and the intervening commits touched."""
         policy = live.resolution
 
-        def versions(name: str) -> Tuple[Optional[str], Optional[str]]:
+        def versions(name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
             ours = puts[name].content_hash() if name in puts else None
-            return ours, live.hash_of(name)
+            return base.hash_of(name), ours, live.hash_of(name)
+
+        def authors(names) -> Dict[str, str]:
+            out: Dict[str, str] = {}
+            for n in names:
+                m = self._changed_between(base, live, n)
+                if m is not None and m.author:
+                    out[n] = m.author
+            return out
 
         if policy == "single-authority":
-            raise Conflict(tx.scope, {n: versions(n) for n in overlap}, policy)
+            raise Conflict(tx.scope, {n: versions(n) for n in overlap}, policy, authors(overlap))
         if policy == "last-writer-wins":
             for name in sorted(overlap):
                 theirs = live.hash_of(name)
@@ -653,20 +697,62 @@ class Store:
                 raise ValueError(f"merge for kind {ours.kind!r} returned a node named {merged.id!r} in {merged.scope!r}")
             puts[name] = merged
         if unresolved:
-            raise Conflict(tx.scope, unresolved, policy)
+            raise Conflict(tx.scope, unresolved, policy, authors(unresolved))
+
+    def _changed_between(self, base: Manifest, live: Manifest, name: str) -> Optional[Manifest]:
+        """The manifest, after `base` up to `live`, that last changed `name`."""
+        m: Optional[Manifest] = live
+        while m is not None and m.seq > base.seq:
+            parent = self._manifests.get(m.parent) if m.parent else None
+            before = parent.hash_of(name) if parent is not None else None
+            if m.hash_of(name) != before:
+                return m
+            m = parent
+        return None
 
 
 class Transaction:
     """N puts and deletes against one scope, committed atomically by CAS on
     the scope's current-manifest pointer (§15)."""
 
-    def __init__(self, store: Store, scope: str, base: Manifest) -> None:
+    def __init__(self, store: Store, scope: str, base: Manifest, author: str = "") -> None:
         self._store = store
         self.scope = scope
         self.base = base
+        self.author = author
+        self.rebased_from: Optional[str] = None
         self.puts: Dict[str, Node] = {}
         self.deletes: Set[str] = set()
         self.committed: Optional[Manifest] = None
+
+    def rebase(self) -> Dict[str, Tuple[Optional[Node], Optional[Node], Optional[Node]]]:
+        """Clean house after an unpleasant surprise. Moves this transaction's
+        base to the scope's live manifest. Staged work on names nobody else
+        touched carries over. For every name both sides touched, the staged
+        change is *unstaged* and handed back as (base, ours, theirs) — None
+        where a side deleted or never bound it — so the caller decides: put
+        a resolution, or let theirs stand. Nothing is committed here; the
+        commit that follows records what this work was rebased from."""
+        if self.committed is not None:
+            raise RuntimeError("transaction already committed")
+        live = self._store.current(self.scope)
+        if live is self.base:
+            return {}
+        moved = pmap_diff(self.base._entries, live._entries).keys
+        contested: Dict[str, Tuple[Optional[Node], Optional[Node], Optional[Node]]] = {}
+        for name in sorted(moved & self.touched):
+            base_h, theirs_h = self.base.hash_of(name), live.hash_of(name)
+            contested[name] = (
+                self._store.get_by_hash(base_h) if base_h else None,
+                self.puts.get(name),
+                self._store.get_by_hash(theirs_h) if theirs_h else None,
+            )
+            self.puts.pop(name, None)
+            self.deletes.discard(name)
+        if self.rebased_from is None:
+            self.rebased_from = self.base.content_hash()
+        self.base = live
+        return contested
 
     @property
     def touched(self) -> frozenset:

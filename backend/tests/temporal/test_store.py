@@ -243,7 +243,8 @@ def test_conflict_names_both_versions():
     t1.commit()
     with pytest.raises(Conflict) as ei:
         t2.commit()
-    ours, theirs = ei.value.versions["strips/asr/segments"]
+    base, ours, theirs = ei.value.versions["strips/asr/segments"]
+    assert base == _asr().content_hash()
     assert ours == _asr(n=6).content_hash() and theirs == _asr(n=5).content_hash()
     assert ei.value.policy == "single-authority"
 
@@ -328,7 +329,74 @@ def test_merge_without_a_rule_for_the_kind_conflicts_with_both_versions_named():
     with pytest.raises(Conflict) as ei:
         t2.commit()
     assert ei.value.policy == "merge"
-    assert ei.value.versions == {"strips/asr/segments": (_asr(n=6).content_hash(), _asr(n=5).content_hash())}
+    assert ei.value.versions == {
+        "strips/asr/segments": (_asr().content_hash(), _asr(n=6).content_hash(), _asr(n=5).content_hash())
+    }
+
+
+def test_git_style_nobody_waits_the_committer_cleans_house():
+    """Founder, 2026-09-07: work against an old snapshot, get the unpleasant
+    surprise at commit, clean house. The conflict says who; rebase hands
+    back (base, ours, theirs); the resolution commits with its provenance."""
+    store = Store()
+    _cooked(store)
+    sam = store.transaction(M, author="sam")
+    alex = store.transaction(M, author="alex")
+    sam.put(_asr(n=5))
+    alex.put(_asr(n=6))
+    alex.put(Node(id="strips/vad/segments", kind="vad.segment", scope=M, data={"on": [1]}))  # uncontested
+    sam_m = sam.commit("sam's recook")
+    with pytest.raises(Conflict) as ei:
+        alex.commit()
+    assert ei.value.authors == {"strips/asr/segments": "sam"}
+    contested = alex.rebase()
+    assert set(contested) == {"strips/asr/segments"}
+    base, ours, theirs = contested["strips/asr/segments"]
+    assert base.data["segments"] == [0, 1, 2] and ours.data["segments"] == list(range(6)) and theirs.data["segments"] == list(range(5))
+    assert "strips/vad/segments" in alex.puts and "strips/asr/segments" not in alex.puts  # uncontested work carried, contested unstaged
+    alex.put(Node(id="strips/asr/segments", kind="asr.segment", scope=M, data={"segments": list(range(7))}, edges=ours.edges))
+    m = alex.commit("merged sam's recook")
+    assert m.author == "alex" and m.parent == sam_m.content_hash()
+    assert m.rebased_from == _cooked_base_hash(store)
+    assert isinstance(store.get(m, "strips/asr/segments"), Node) and store.get(m, "strips/asr/segments").data["segments"] == list(range(7))
+    assert isinstance(store.get(m, "strips/vad/segments"), Node)
+    assert m.as_node().data["author"] == "alex" and m.as_node().data["rebased_from"] == m.rebased_from
+
+
+def _cooked_base_hash(store: Store) -> str:
+    """The manifest `_cooked` produced (seq 1)."""
+    return [m for m in store.history(M) if m.seq == 1][0].content_hash()
+
+
+def test_rebase_is_a_no_op_when_nothing_moved_and_theirs_stands_if_you_do_nothing():
+    store = Store()
+    _cooked(store)
+    tx = store.transaction(M, author="alex")
+    tx.put(_asr(n=6))
+    assert tx.rebase() == {} and tx.rebased_from is None
+    other = store.transaction(M, author="sam")
+    other.put(_asr(n=5))
+    other.commit()
+    contested = tx.rebase()
+    assert set(contested) == {"strips/asr/segments"}
+    m = tx.commit()  # alex decided nothing: sam's version stands, and the manifest says the work was rebased
+    assert m.hash_of("strips/asr/segments") == _asr(n=5).content_hash()
+    assert m.rebased_from is not None and m.author == "alex"
+
+
+def test_blame_names_who_last_changed_a_name():
+    store = Store()
+    m1 = _cooked(store)
+    tx = store.transaction(M, author="sam")
+    tx.put(_asr(n=5))
+    m2 = tx.commit()
+    tx = store.transaction(M, author="alex")
+    tx.put(Node(id="strips/vad/segments", kind="vad.segment", scope=M, data={}))
+    tx.commit()
+    assert store.blame(M, "strips/asr/segments") is m2
+    assert store.blame(M, "strips/asr/segments", since=m2) is None
+    assert store.blame(M, "audio.wav") is m1 and m1.author == ""
+    assert store.blame(M, "never/bound") is None
 
 
 # --- generations: a producer only ever reads the past --------------------------------

@@ -499,9 +499,21 @@ refuses and names both versions; `last-writer-wins` admits and records
 what it overrode; `merge` folds the versions through a function
 registered for the node's kind — the slot a CRDT join or an
 application rule plugs into. Changing policy is itself a commit.
-Disjoint-name commits rebase under every policy. Ownership leases, and
-per-region rather than per-scope policy, are the next two steps when a
-consumer needs them.
+Disjoint-name commits rebase under every policy. Most overlap never
+happens, because write access to the same names rarely overlaps. Where
+it does, **nobody waits** (founder, 2026-09-07): work proceeds against
+an old snapshot, the commit is the unpleasant surprise, and the
+committer cleans house — `Transaction.rebase()` hands back (base, ours,
+theirs) per contested name, the caller puts a resolution and commits,
+and the manifest records who committed and what it was rebased from
+(`author`, `rebased_from`; `Store.blame` answers who last changed a
+name). Kinds that know how to fold — CRDT joins, OT transforms,
+application rules, or a Redux-shaped replay of recorded actions — take
+the automatic path under `merge`. Writers to a shared range are trusted
+to be competent; where that trust is not available, the manifest chain
+is already a Merkle history and *signed* manifests make it a ledger —
+designed, not built. Ownership leases were considered and rejected:
+contention makes people wait, which is the one thing this must never do.
 
 ## 16. Pruning + resurrection (envelopes as rebuild slates)
 

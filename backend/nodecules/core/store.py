@@ -216,24 +216,23 @@ def make_envelope(
     inputs: Mapping[str, str],
     cooked_at_ms: Optional[int] = None,
     state: str = "dry",
+    **receipt: Any,
 ) -> Node:
     """Build the envelope for `node`: a distinct node that names the content,
     pins its identity, records the recipe and the input versions it was
-    cooked from, and carries the same edges so lineage survives pruning."""
-    return Node(
-        id=envelope_id(node.id),
-        kind=ENVELOPE_KIND,
-        scope=node.scope,
-        data={
-            "of": node.id,
-            "content_hash": node.content_hash(),
-            "recipe": dict(recipe),
-            "inputs": dict(inputs),
-            "state": state,
-            "cooked_at_ms": cooked_at_ms,
-        },
-        edges=node.edges,
-    )
+    cooked from, and carries the same edges so lineage survives pruning.
+    Extra keyword fields (`cache_key`, `outcome`, `reproducibility`,
+    `measured`, …) are the receipt of production and are stored as given."""
+    data: Dict[str, Any] = {
+        "of": node.id,
+        "content_hash": node.content_hash(),
+        "recipe": dict(recipe),
+        "inputs": dict(inputs),
+        "state": state,
+        "cooked_at_ms": cooked_at_ms,
+    }
+    data.update(receipt)
+    return Node(id=envelope_id(node.id), kind=ENVELOPE_KIND, scope=node.scope, data=data, edges=node.edges)
 
 
 # --- Manifests ----------------------------------------------------------------

@@ -11,7 +11,7 @@ Kept separate from the ADT so `strip_access.py` stays dependency-light
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Mapping, Any
 
 from .strip_access import (
     AbsoluteMs,
@@ -64,14 +64,26 @@ def resolve_range(pattern: RangePattern, window: TimeRange) -> ResolvedRange:
     )
 
 
+def _field(obj: Any, name: str) -> Any:
+    """Attribute or mapping key — a strip element may be a model or, once it
+    has been through the store, a plain dict. Absence raises loudly."""
+    if isinstance(obj, Mapping):
+        if name not in obj:
+            raise AttributeError(f"element has no field {name!r}")
+        return obj[name]
+    return getattr(obj, name)
+
+
 def _intersects(window: TimeRange, value: Any) -> bool:
-    """True if `value` (a TimeRange-shaped object) intersects `window`.
+    """True if `value` (a TimeRange-shaped object or mapping) intersects
+    `window`.
 
     Duck-typed on `start_ms` / `end_ms` — the strip element may carry a
     stenota `TimeRange`, which is structurally identical to the nodecules
-    one but a distinct type (kept distinct on purpose; see CLAUDE.md).
+    one but a distinct type (kept distinct on purpose; see CLAUDE.md), or a
+    `{"start_ms", "end_ms"}` dict from the node store.
     """
-    return window.start_ms < value.end_ms and value.start_ms < window.end_ms
+    return window.start_ms < _field(value, "end_ms") and _field(value, "start_ms") < window.end_ms
 
 
 def range_matches(resolved: ResolvedRange, element: Any) -> bool:
@@ -85,7 +97,7 @@ def range_matches(resolved: ResolvedRange, element: Any) -> bool:
     declaration disagrees with the strip's schema, which is a bug worth
     surfacing loudly rather than silently never-matching.
     """
-    value = getattr(element, resolved.field)
+    value = _field(element, resolved.field)
     if isinstance(value, (list, tuple)):
         return any(_intersects(resolved.window, v) for v in value)
     return _intersects(resolved.window, value)

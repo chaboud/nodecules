@@ -7,12 +7,14 @@ v2 reference model; the working title "REFERENCE-MODEL" survives only as a
 filename.
 
 **Status:** Part I (the model) is design-only. Part II is design with
-five pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
+six pieces now shipped as code: **PR-r1** (`a40772c`) — the typed
 access-pattern ADT — **PR-r2** (`ba9835a`) — the access-pattern
 resolver — **PR-d1** — descriptions and the satisfies judgment (§22b)
-— **PR-d2** — placement, the plan as an artifact (§22c) — and
-**PR-r3a** — the node store's declarative core (§9, §15, §16: manifests,
-CAS transactions, envelopes, residency). The rest of Part II is unbuilt.
+— **PR-d2** — placement, the plan as an artifact (§22c) — **PR-r3a** —
+the node store's declarative core (§9, §15, §16: manifests, CAS
+transactions, envelopes, residency) — and **PR-r5a** — generation over
+the store (§6: produce node X, four outcomes, envelopes as receipts,
+plans dispatched). The rest of Part II is unbuilt.
 
 Seventh draft. v6 baked in **scope** as a first-class structural
 concept; v7 folds in **instance continuation / the settling spectrum**
@@ -259,6 +261,22 @@ A generation can have four outcomes:
 For nodes that reference *their own* prior output (IIR / settling
 nodes), the cost and recoverability of resurrection depend on where
 the node sits on the settling spectrum — see §17.
+
+**Shipped as PR-r5a** (`core/generation.py`; vault ADR-0026). A node's
+*declaration* is its kind and edges — inputs by role, a `recipe` edge to
+a `recipe.template` node, an optional `params` edge — and its *output*
+is its data. The cache key is the declaration composed with what the
+edges resolved to, the realization, and the params; the envelope is the
+receipt of production (realization declared and used, inputs by
+identity, cache key, outcome, reproducibility, and whether
+reproducibility was *measured* by a re-production or only *declared*).
+`exact` / `via-substitute` is the identity axis, `equivalent` the
+reproducibility axis, `lost` names the unrecoverable reference; a
+realization that declared determinism and reproduced a different hash
+is flagged as a falsified claim. `dispatch(plan)` runs a placement plan:
+assignments become bindings, the plan hash and executor go in every
+envelope. Not yet: running on another executor, routing kinds (§18),
+retention.
 
 ## 7. Manifests anchor versions (per scope)
 
@@ -1044,11 +1062,21 @@ store is agnostic to until PR-r15 grounds it. ~900 LOC.
 First-class kinds. Schemas, retention, ref constraints, recipe
 interfaces. Runtime kind addition. ~400 + 300 LOC.
 
-### PR-r5: Generation engine
-"Produce node X" as a unified primitive. Dirty propagation,
-resurrection, cold-start all routed through it. Four-outcome
-return. **Must be IIR-aware:** settling-node warm-up resurrection
-(§17). ~600 + 500 LOC.
+### PR-r5a: Generation engine — the core — SHIPPED
+`core/generation.py`: `Realization`, `Generator.produce` (cold start,
+stale recook, resurrection through one path; four outcomes; cache key
+= declaration + resolved inputs + realization + params; envelope as
+receipt with measured-vs-declared reproducibility and the falsified-
+determinism flag), `Generator.dispatch(plan)`, `select` for access
+patterns. Exercised on a stenota-shaped graph with mock realizations.
+9 tests. The canary proper — stenota's real nodes wrapped as
+realizations, byte-for-byte against lite — is stenota HARDWARE-TODO H11.
+
+### PR-r5b: Generation engine — dirty propagation and settling nodes
+Change-driven recook (today production is pull-only), routing kinds
+(§18) as the `via-substitute` source, executing on the assigned
+executor. **Must be IIR-aware:** settling-node warm-up resurrection
+(§17). ~400 LOC.
 
 ### PR-r6: Retention policies + refcount mechanics
 Per-kind retention curves. System refs vs user/in-flight refs.

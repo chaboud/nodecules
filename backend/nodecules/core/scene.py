@@ -26,6 +26,14 @@ expiration (for resiliency). This module is that contract, with no pixels:
   says, per element, the local tick it will be shown at and why.
 - **Presented-at comes back** as table ticks (`presented()`), so sync
   quality is an observation like any other cost.
+- **The frame carries data and choice structure, never pixels** (founder,
+  2026-09-13). A payload is semantic; a presenter interprets it for its
+  surface, and a user's or system's own interpreter — a screen reader is
+  the classic case — is a legitimate presenter. Producers publish several
+  ticks ahead and may be *instructive* about transitions (`enter`,
+  `exit`: a kind and a duration) without owning them: a renderer keeps
+  agency and may honour, shorten, or ignore a hint. `schedule` reports
+  when a transition would begin and whether it had to be truncated.
 
 No clocks are read here. A surface's `now` is passed in.
 """
@@ -49,9 +57,21 @@ Status = Literal["on-time", "late", "skipped", "slipped"]
 # --- elements -----------------------------------------------------------------
 
 
+class Transition(BaseModel):
+    """A hint about how an element arrives or leaves: a kind the presenter
+    may interpret ("fade", "slide", "cut", "renderer-choice") and how long
+    it should take, in table ticks. Advisory: renderers keep agency."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str = "renderer-choice"
+    duration: int = Field(default=0, ge=0)
+
+
 class Element(BaseModel):
-    """The data shape of a scene node: when it is meant to be shown, when it
-    stops being true, where it goes, and what the presenter renders."""
+    """The data shape of a scene node: when it is meant to be fully shown,
+    when it stops being true, where it goes, what the presenter interprets,
+    and how it might arrive and leave."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -60,6 +80,8 @@ class Element(BaseModel):
     region: str = ""
     z: int = 0
     payload: Any = None
+    enter: Optional[Transition] = None
+    exit: Optional[Transition] = None
 
     @model_validator(mode="after")
     def _ordered(self) -> "Element":
@@ -102,6 +124,8 @@ class FrameElement(BaseModel):
     present_at: int
     expires_at: int
     payload: Any = None
+    enter: Optional[Transition] = None
+    exit: Optional[Transition] = None
 
 
 class Frame(BaseModel):
@@ -150,6 +174,8 @@ def frame(store: Store, manifest: Manifest, t: int, *, timeline: str) -> Frame:
                 present_at=el.present_at,
                 expires_at=el.expires_at,
                 payload=el.payload,
+                enter=el.enter,
+                exit=el.exit,
             )
         )
     chosen.sort(key=lambda e: (e.z, e.region, e.id))
@@ -232,7 +258,9 @@ class ScheduledItem(BaseModel):
 
     id: str
     status: Status
-    local_tick: Optional[int]  # when this surface will show it, on its own clock; None if skipped
+    local_tick: Optional[int]  # when this surface will have it fully shown, on its own clock; None if skipped
+    begin_local: Optional[int] = None  # when the enter transition would start; equals local_tick when there is none
+    truncated: bool = False  # the transition could not run in full and the renderer must shorten it
 
 
 class Schedule(BaseModel):
@@ -247,6 +275,11 @@ class Schedule(BaseModel):
 def _snap_up(tick: Fraction | int, period: Fraction) -> int:
     """The first grid boundary at or after `tick`."""
     return int(ceil(Fraction(tick) / period) * period)
+
+
+def _snap_down(tick: Fraction | int, period: Fraction) -> int:
+    """The last grid boundary at or before `tick`."""
+    return int((Fraction(tick) // period) * period)
 
 
 def schedule(surface: Surface, fr: Frame, now_local: int, policy: TablePolicy, timelines: Mapping[str, Timeline]) -> Schedule:
@@ -264,15 +297,20 @@ def schedule(surface: Surface, fr: Frame, now_local: int, policy: TablePolicy, t
     for el in fr.elements:
         target = convert(Instant(ticks=el.present_at, timeline=policy.timeline), surface.to_local, timelines).instant.ticks
         at = _snap_up(target, refresh_local)
+        enter_local = _ticks((el.enter.duration if el.enter else 0) * table_tb.seconds_per_tick(), local_tb, "floor")
+        begin = _snap_down(at - enter_local, refresh_local) if enter_local else at
         if at >= earliest:
-            items.append(ScheduledItem(id=el.id, status="on-time", local_tick=at))
+            truncated = begin < earliest
+            items.append(ScheduledItem(id=el.id, status="on-time", local_tick=at, begin_local=max(begin, _snap_up(earliest, refresh_local)) if truncated else begin, truncated=truncated))
             continue
         if policy.lateness == "skip":
             items.append(ScheduledItem(id=el.id, status="skipped", local_tick=None))
         elif policy.lateness == "present-late":
-            items.append(ScheduledItem(id=el.id, status="late", local_tick=_snap_up(earliest, refresh_local)))
+            late_at = _snap_up(earliest, refresh_local)
+            items.append(ScheduledItem(id=el.id, status="late", local_tick=late_at, begin_local=late_at, truncated=enter_local > 0))
         else:
-            items.append(ScheduledItem(id=el.id, status="slipped", local_tick=_snap_up(earliest, slot_local)))
+            slip_at = _snap_up(earliest, slot_local)
+            items.append(ScheduledItem(id=el.id, status="slipped", local_tick=slip_at, begin_local=slip_at, truncated=enter_local > 0))
     return Schedule(surface=surface.id, frame=fr.content_hash(), now_local=now_local, items=tuple(items))
 
 
@@ -308,6 +346,7 @@ __all__ = [
     "ScheduledItem",
     "Surface",
     "TablePolicy",
+    "Transition",
     "degraded",
     "element_of",
     "expired",

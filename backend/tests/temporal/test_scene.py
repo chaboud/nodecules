@@ -10,6 +10,7 @@ from nodecules.core.scene import (
     Element,
     Surface,
     TablePolicy,
+    Transition,
     degraded,
     expired,
     frame,
@@ -176,3 +177,25 @@ def test_publishing_ahead_by_the_lead_keeps_every_surface_on_time():
         arrive = convert(Instant(ticks=t_now_table + surf.delivery_ticks, timeline="table"), surf.to_local, TL).instant.ticks
         s = schedule(surf, f, arrive, POLICY, TL)
         assert s.items[0].status == "on-time", (surf.id, s.items[0])
+
+
+def test_transitions_are_hints_the_renderer_keeps_agency_over():
+    """An enter transition begins before present-at so the element is fully
+    shown on time; when there is not enough runway the schedule says the
+    renderer must truncate it, rather than making the element late."""
+    store = Store()
+    t_show = 5_000 * MS
+    fade = Transition(kind="fade", duration=200 * MS)
+    tx = store.transaction(TABLE, author="kid")
+    tx.put(Node(id="card/1", kind="ui.card", scope=TABLE, data=Element(present_at=t_show, expires_at=t_show + 1_000 * MS, enter=fade, payload={"choice": ["a", "b"]}).model_dump()))
+    m = tx.commit()
+    f = frame(store, m, t_show, timeline="table")
+    assert f.elements[0].enter == fade and f.elements[0].payload == {"choice": ["a", "b"]}  # semantics and hints travel; no pixels
+    early = schedule(WALL, f, 3_000_000_000 + 4 * 10**9, POLICY, TL)
+    item = early.items[0]
+    assert item.status == "on-time" and not item.truncated
+    assert item.local_tick - item.begin_local >= 200 * 10**6 - (10**9 // 60) - 1  # about the fade, on the wall's grid
+    # arriving 100 ms before the instant: fully shown on time, but the fade cannot run in full
+    tight = schedule(WALL, f, 3_000_000_000 + 4_900_000_000, POLICY, TL)
+    item = tight.items[0]
+    assert item.status == "on-time" and item.truncated and item.begin_local >= tight.now_local

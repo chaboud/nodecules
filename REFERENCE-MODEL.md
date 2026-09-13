@@ -754,8 +754,16 @@ latencies, and a map from the table's timeline; its simultaneity bound
 lead is the worst bound, and a surface beyond the table's tolerance is
 named as degraded. Lateness is a declared policy: skip, present late,
 or slip to the table's slot grid. Presented-at comes back on the table's
-timeline as an observation. Not built: presenters, sync estimation as a
-recipe, the retention that consumes `expired()`.
+timeline as an observation. **The frame carries data and choice
+structure, never pixels** (founder, 2026-09-13): payloads are semantic, a
+presenter interprets them for its surface, and a user's or system's own
+interpreter — a screen reader — is a legitimate presenter. Producers
+publish several ticks ahead and may be *instructive* about transitions
+(`enter` / `exit`: a kind and a duration) without owning them; a renderer
+keeps agency and `schedule` says when a transition would begin and
+whether it must be truncated. Not built: presenters beyond a text one in
+`demos/`, sync estimation as a recipe, the retention that consumes
+`expired()`.
 
 ## 21. Diagnostics live outside the node store
 
@@ -1117,6 +1125,12 @@ never raises, canonical parent order), `merge_head`, `transfer`, `sync`;
 `Surface`, `simultaneity_bound`, `lead`, `degraded`, `TablePolicy`,
 `schedule` (lateness policy), `presented`, `spread`. Two simulated
 surfaces present within the bound. 7 tests.
+
+### Runway to demos — SHIPPED
+`core/strip_nodes.py` (a strip as one copy-on-write node, the small
+form), `core/llm_realization.py` (any `ToolAwareProvider` as a
+`Realization`), transition hints in `core/scene.py`; `demos/` with
+`chat_live_graph.py` running on an echo provider. 3 tests.
 
 ### PR-r5b: Generation engine — dirty propagation and settling nodes
 Change-driven recook (today production is pull-only), routing kinds

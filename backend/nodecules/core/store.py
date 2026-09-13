@@ -252,6 +252,7 @@ class Manifest(BaseModel):
     note: str = ""
     author: str = ""  # who committed; the first field of a ledger
     rebased_from: Optional[str] = None  # the manifest this work was originally done against, if it moved
+    merge_parent: Optional[str] = None  # a merge manifest's second parent; `parent` is then the smaller hash
     resolution: Resolution = "single-authority"
     resolution_version: int = 1
     overrode: Tuple[Tuple[str, str], ...] = ()  # (name, hash that lost) under last-writer-wins
@@ -269,6 +270,7 @@ class Manifest(BaseModel):
         note: str = "",
         author: str = "",
         rebased_from: Optional[str] = None,
+        merge_parent: Optional[str] = None,
         resolution: Resolution = "single-authority",
         resolution_version: int = 1,
         overrode: Tuple[Tuple[str, str], ...] = (),
@@ -281,6 +283,7 @@ class Manifest(BaseModel):
             note=note,
             author=author,
             rebased_from=rebased_from,
+            merge_parent=merge_parent,
             resolution=resolution,
             resolution_version=resolution_version,
             overrode=overrode,
@@ -290,6 +293,10 @@ class Manifest(BaseModel):
 
     def hash_of(self, node_id: str) -> Optional[str]:
         return self._entries.get(node_id)
+
+    @property
+    def parents(self) -> Tuple[str, ...]:
+        return tuple(h for h in (self.parent, self.merge_parent) if h is not None)
 
     def __contains__(self, node_id: object) -> bool:
         return node_id in self._entries
@@ -316,6 +323,7 @@ class Manifest(BaseModel):
                 "note": self.note,
                 "author": self.author,
                 "rebased_from": self.rebased_from,
+                "merge_parent": self.merge_parent,
                 "resolution": self.resolution,
                 "resolution_version": self.resolution_version,
                 "overrode": [list(o) for o in self.overrode],
@@ -422,6 +430,27 @@ class Store:
 
     def manifest(self, content_hash: str) -> Optional[Manifest]:
         return self._manifests.get(content_hash)
+
+    def has_body(self, content_hash: str) -> bool:
+        return self._residency.get(content_hash) == "ram"
+
+    def import_body(self, node: Node) -> str:
+        """Admit a body that arrived from another replica."""
+        return self._admit(node)
+
+    def import_manifest(self, manifest: Manifest) -> None:
+        """Register a manifest that arrived from another replica. Does not
+        move the scope's head; `merge_head` does that."""
+        self._admit(manifest.as_node())
+        self._manifests.setdefault(manifest.content_hash(), manifest)
+
+    def set_head(self, scope: str, manifest: Manifest) -> None:
+        """Point a scope at a known manifest (fast-forward or a merge result).
+        Callers are the replica layer; ordinary writes go through commits."""
+        with self._lock:
+            if manifest.content_hash() not in self._manifests:
+                raise ValueError("unknown manifest")
+            self._current[scope] = manifest
 
     def history(self, scope: str) -> Iterator[Manifest]:
         """Walk the parent chain from the current manifest to genesis."""

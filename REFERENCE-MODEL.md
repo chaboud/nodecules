@@ -12,9 +12,12 @@ access-pattern ADT — **PR-r2** (`ba9835a`) — the access-pattern
 resolver — **PR-d1** — descriptions and the satisfies judgment (§22b)
 — **PR-d2** — placement, the plan as an artifact (§22c) — **PR-r3a** —
 the node store's declarative core (§9, §15, §16: manifests, CAS
-transactions, envelopes, residency) — and **PR-r5a** — generation over
-the store (§6: produce node X, four outcomes, envelopes as receipts,
-plans dispatched). The rest of Part II is unbuilt.
+transactions, envelopes, residency) — **PR-r5a** — generation over the
+store (§6: produce node X, four outcomes, envelopes as receipts, plans
+dispatched) — **the CRDT basis** (§22: manifests as a DAG, a
+deterministic merge, replica sync) — and **scenes** (§20b: presentation
+time, expiry, the frame as a pure function, the simultaneity bound).
+The rest of Part II is unbuilt.
 
 Seventh draft. v6 baked in **scope** as a first-class structural
 concept; v7 folds in **instance continuation / the settling spectrum**
@@ -737,6 +740,23 @@ matching React components to `sink.*` kinds — an oscilloscope
 sink in the graph editor renders as an oscilloscope panel in the
 playground view.
 
+## 20b. Scenes — presentation time, expiry, the frame (shipped 2026-09-13)
+
+Founder: *coordinated UI isn't "as fast as possible"; it's "at the same
+time."* `core/scene.py` (vault ADR-0028): an element's validity is a
+span on the table's timeline (§ `core/timeline.py`), never a wall
+clock; persistence is renewal. The frame at instant `t` is a pure,
+content-addressed function of (manifest, `t`) with a deterministic
+order — so a frame is a producible node and "what was shown when" is
+answerable from the store. A surface has a clock, a refresh grid,
+latencies, and a map from the table's timeline; its simultaneity bound
+(map error + one refresh + delivery + render) is knowable, the table's
+lead is the worst bound, and a surface beyond the table's tolerance is
+named as degraded. Lateness is a declared policy: skip, present late,
+or slip to the table's slot grid. Presented-at comes back on the table's
+timeline as an observation. Not built: presenters, sync estimation as a
+recipe, the retention that consumes `expired()`.
+
 ## 21. Diagnostics live outside the node store
 
 Errors, logs, traces, perf metrics live in the **event log**
@@ -765,10 +785,25 @@ within a scope.
   one producer in the graph).
 - **User pin vs system recook.** Per-node policy (pin wins).
 
+**Shipped 2026-09-13 — the CRDT basis** (`core/replica.py`; vault
+ADR-0027). Every replica commits locally; a scope's history is a DAG of
+manifests where a merge has two parents in canonical hash order, so the
+same two heads merge to the same manifest hash everywhere; the merge
+uses the nearest common ancestor and never raises (one side changed:
+take it; delete vs change: keep the change; both changed: the kind's
+rule in canonical order, else a `conflict` node naming both versions,
+resolved by a later commit); sync moves only what the other side lacks,
+by hash. The DAG is the vector clock. Which line of history is
+*canonical* for a scope is a second policy layer — head acceptance —
+recorded as a draft taxonomy in the vault
+(`concepts/authority-models.md`) and not yet a field.
+
 Future (out of scope for v0.x):
 
 - **Multi-instance live edit across scopes.** Two stenota processes
-  editing the same project scope. Real OT/CRDT territory.
+  editing the same project scope. The replica layer is the basis; an
+  operations log per kind (a strip with a fold) is the op-based half,
+  not built.
 - **Cross-scope atomic transactions.** Two-phase commit across
   multiple scope manifests.
 - **Redux-shaped action log.** Make the event log canonical;
@@ -1071,6 +1106,17 @@ determinism flag), `Generator.dispatch(plan)`, `select` for access
 patterns. Exercised on a stenota-shaped graph with mock realizations.
 9 tests. The canary proper — stenota's real nodes wrapped as
 realizations, byte-for-byte against lite — is stenota HARDWARE-TODO H11.
+
+### The CRDT basis — SHIPPED
+`core/replica.py`: `ancestors`, `common_ancestor`, `merge` (deterministic,
+never raises, canonical parent order), `merge_head`, `transfer`, `sync`;
+`Manifest.merge_parent`. Convergence properties tested. 9 tests.
+
+### Scenes — SHIPPED
+`core/scene.py`: `Element`, `frame` (pure), `expired`, `renewed`,
+`Surface`, `simultaneity_bound`, `lead`, `degraded`, `TablePolicy`,
+`schedule` (lateness policy), `presented`, `spread`. Two simulated
+surfaces present within the bound. 7 tests.
 
 ### PR-r5b: Generation engine — dirty propagation and settling nodes
 Change-driven recook (today production is pull-only), routing kinds

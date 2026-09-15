@@ -765,6 +765,24 @@ whether it must be truncated. Not built: presenters beyond a text one in
 `demos/`, sync estimation as a recipe, the retention that consumes
 `expired()`.
 
+## 20c. The table — open collaboration at the edge, and attention (shipped 2026-09-15)
+
+Founder: *"open edge collaboration and attention is a fun start. Think
+Figma. I don't have to follow someone, but I can."* `core/table.py`, on
+the replica and scene halves: participants are nodes; **attention** is
+an element in a `presence` region with an expiry, so who is looking at
+what is in the store and a participant who stops renewing fades out of
+everyone's frame; **following** is optional and per person — my
+effective focus is mine or that of whom I follow, transitively with a
+cycle guard and a fallback to my own when they go quiet — and never
+moves anyone else; **open collaboration on one element converges
+field-wise** across replicas (each side's changed payload fields win; a
+field both changed goes to a deterministic tie-break identical on every
+replica), registered as the merge rule for the table's element kinds.
+`demos/table_attention.py` runs it on two replicas. Not built:
+decisions and presentations, the responsible adult, presenters beyond
+text, transport.
+
 ## 21. Diagnostics live outside the node store
 
 Errors, logs, traces, perf metrics live in the **event log**
@@ -1131,6 +1149,12 @@ surfaces present within the bound. 7 tests.
 form), `core/llm_realization.py` (any `ToolAwareProvider` as a
 `Realization`), transition hints in `core/scene.py`; `demos/` with
 `chat_live_graph.py` running on an echo provider. 3 tests.
+
+### The table, first slice — SHIPPED
+`core/table.py`: `Participant`, `join`, `Focus`, `attend`, `renew`,
+`follow`, `present`, `view_for`, `fieldwise_merge`, `open_collaboration`.
+4 tests; `demos/table_attention.py`. A deadlock in `set_resolution` on a
+fresh scope was found and fixed on the way.
 
 ### PR-r5b: Generation engine — dirty propagation and settling nodes
 Change-driven recook (today production is pull-only), routing kinds

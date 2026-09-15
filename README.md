@@ -1,3 +1,5 @@
+> **New here?** Read [WHY-WHAT-HOW.md](WHY-WHAT-HOW.md): the plain explanation of what nodecules is becoming and why it is structured the way it is. The rest of this README describes the legacy engine on `main`.
+
 # Nodecules [under construction and **very** unstable]
 
 A basic node-based graph processing engine for building flexible AI-powered workflows with visual graph editing and conversational interfaces.

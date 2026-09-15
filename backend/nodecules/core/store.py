@@ -481,8 +481,9 @@ class Store:
         version (ADR-0007: labelled and versioned)."""
         if policy not in RESOLUTIONS:
             raise ValueError(f"unknown resolution policy {policy!r}; one of {RESOLUTIONS}")
+        self.current(scope)  # ensure genesis exists before taking the (non-reentrant) lock
         with self._lock:
-            live = self.current(scope)
+            live = self._current[scope]
             if live.resolution == policy:
                 return live
             m = Manifest.build(

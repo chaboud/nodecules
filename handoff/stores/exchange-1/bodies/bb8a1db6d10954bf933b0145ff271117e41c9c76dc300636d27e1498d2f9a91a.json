@@ -1,0 +1,1 @@
+{"data":{"params":{"max_tokens":1200,"system":"You are helping a traveller choose. For each option in the decision, write one line they would want to read. Answer as JSON: an object from option id to line."},"realization":"llm.spark@1"},"edges":[],"id":"recipes/consider","kind":"recipe.template","scope":"lib"}

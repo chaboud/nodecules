@@ -57,7 +57,7 @@ not the one currently being grounded against.
 | `main` | the original engine. Working, unstable, partly aspirational docs. | leave alone unless fixing `main` |
 | `feat/temporality` | temporal primitives for stenota: `TimeRange`, `TimeSource`, `ChunkedContext`, `TemporalScheduler`, node cache, annotations. Contains `main`. Fast-forwarded to track the substrate work below. | stenota-driven work |
 | `claude/recon-nodecules-t9Dqq` | the laptop's substrate line: `REFERENCE-MODEL.md` (declarative generation DAG over a COW node store) plus shipped code: strips, typed access patterns (PR-r1), the resolver (PR-r2), subscriptions, environment, tool-aware providers, cycle validator — 279 tests, no DB required. Descends from `feat/temporality`. | laptop instance |
-| `claude/nodecules-v2-naming-matching-vmkexv` | **the live cloud-side line.** Everything above plus `spikes/` (identity-bench E1–E7, matching-bench M1–M8) and this file. Supersedes `claude/llm-wiki-distributed-compute-ii9ijq`, which it contains. | cloud instance |
+| `claude/nodecules-v2-naming-matching-vmkexv` | **the live cloud-side line.** Everything above plus `spikes/` (identity-bench E1–E7, matching-bench M1–M8), the substrate core, `demos/`, `handoff/`, and this file. Supersedes `claude/llm-wiki-distributed-compute-ii9ijq`, which it contains. | cloud instance, and the DGX Spark instance through `handoff/` |
 
 Cloud session branches get renamed by the harness between sessions, and a
 handoff has twice deleted the old remote branch and re-seeded the new name
@@ -86,6 +86,7 @@ instances that don't.
 - **Provider adapters (chat-shaped)** — `backend/nodecules/core/smart_context.py` with Ollama, Anthropic, Bedrock, Mock adapters. Used by chat nodes. The tool-aware abstraction is `core/llm_providers.py`.
 - **Content-addressable chat contexts** — `backend/nodecules/core/content_addressable_context.py`. Postgres-backed store keyed by `sha256(messages)[:16]`. This is a chat-message-history cache, **not** the general node-output cache (that is `core/node_cache.py`).
 - **Spikes** — `spikes/` holds throwaway design benches with measured findings. Not core, not imported by anything. See `spikes/README.md`.
+- **Hand-off** — `handoff/` is how the cloud session and the Claude Code session on the DGX Spark work together (2026-09-18): passed notes in `inbox/<party>/`, exchange stores under `stores/` as the transport (a store directory is git-mergeable), `fulfil.py` to answer pending requests with a real model, `note.py` for the notes. Read `handoff/README.md` before writing there; `handoff/SPARK.md` is the letter that started it.
 
 ## Hard invariants (violations require explicit discussion in the PR)
 

@@ -1,0 +1,1 @@
+{"data":null,"edges":[{"optional":false,"pattern":{"kind":"all"},"role":"messages","scope":null,"target":"strips/messages"},{"optional":false,"pattern":{"kind":"all"},"role":"recipe","scope":"lib","target":"recipes/reply"}],"id":"reply","kind":"chat.reply","scope":"chat/spark"}

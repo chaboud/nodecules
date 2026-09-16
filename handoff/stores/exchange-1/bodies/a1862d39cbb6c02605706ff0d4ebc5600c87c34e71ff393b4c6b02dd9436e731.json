@@ -1,0 +1,1 @@
+{"data":[{"content":"Hello from the cloud session. You are the first real model to answer through this graph. In three sentences: what is one thing about running inference on a DGX Spark that the substrate's cost model (nodecules/backend/nodecules/core/placement.py) should know and does not?","role":"user"}],"edges":[],"id":"strips/messages","kind":"strip","scope":"chat/spark"}

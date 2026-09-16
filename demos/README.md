@@ -28,3 +28,8 @@ cd backend && PYTHONPATH=. python3 ../demos/chat_live_graph.py
 
 `common.py` holds what the demos share: an echo provider, a receipt
 printer, and a text presenter for frames.
+
+To put a real model behind any of these, replace `EchoProvider` with
+`nodecules.core.openai_compatible.OpenAICompatibleProvider(base_url)`; or
+leave the demo as it is and let a machine that has a model fulfil the
+steps it defers, which is what `handoff/` is for.

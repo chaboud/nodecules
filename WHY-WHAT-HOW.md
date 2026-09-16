@@ -9,7 +9,8 @@ three assume.
 
 Status words are used carefully throughout. "Built" means code with tests
 on the branch. "Designed" means a written decision with no code. "Not
-started" means exactly that.
+started" means exactly that. `STATUS.md` is the running account of how much
+of what follows exists, property by property.
 
 ## Why
 

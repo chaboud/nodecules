@@ -1,4 +1,4 @@
-> **New here?** Read [WHY-WHAT-HOW.md](WHY-WHAT-HOW.md): the plain explanation of what nodecules is becoming and why it is structured the way it is. The rest of this README describes the legacy engine on `main`.
+> **New here?** Read [WHY-WHAT-HOW.md](WHY-WHAT-HOW.md): the plain explanation of what nodecules is becoming and why it is structured the way it is. [STATUS.md](STATUS.md) says how much of it exists. The rest of this README describes the legacy engine on `main`.
 
 # Nodecules [under construction and **very** unstable]
 

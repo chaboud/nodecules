@@ -3,7 +3,8 @@
 Instructions for Claude Code working in this repo. Several instances work here
 from different machines — **read the branch map before you commit anything.**
 Read `WHY-WHAT-HOW.md` first if you are new here: it is the plain explanation
-of what nodecules is and why it is structured this way. Then `README.md`
+of what nodecules is and why it is structured this way, and `STATUS.md` says
+how much of it exists, property by property; update it with every slice. Then `README.md`
 before making any non-trivial change, `TEMPORALITY.md` before touching the
 temporal machinery, and `REFERENCE-MODEL.md` for the substrate design this
 repo is becoming the vehicle for.

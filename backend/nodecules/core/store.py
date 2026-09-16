@@ -253,6 +253,7 @@ class Manifest(BaseModel):
     author: str = ""  # who committed; the first field of a ledger
     rebased_from: Optional[str] = None  # the manifest this work was originally done against, if it moved
     merge_parent: Optional[str] = None  # a merge manifest's second parent; `parent` is then the smaller hash
+    activated: Optional[str] = None  # the manifest whose content this one restored, if it is an activation
     resolution: Resolution = "single-authority"
     resolution_version: int = 1
     overrode: Tuple[Tuple[str, str], ...] = ()  # (name, hash that lost) under last-writer-wins
@@ -271,6 +272,7 @@ class Manifest(BaseModel):
         author: str = "",
         rebased_from: Optional[str] = None,
         merge_parent: Optional[str] = None,
+        activated: Optional[str] = None,
         resolution: Resolution = "single-authority",
         resolution_version: int = 1,
         overrode: Tuple[Tuple[str, str], ...] = (),
@@ -284,6 +286,7 @@ class Manifest(BaseModel):
             author=author,
             rebased_from=rebased_from,
             merge_parent=merge_parent,
+            activated=activated,
             resolution=resolution,
             resolution_version=resolution_version,
             overrode=overrode,
@@ -324,6 +327,7 @@ class Manifest(BaseModel):
                 "author": self.author,
                 "rebased_from": self.rebased_from,
                 "merge_parent": self.merge_parent,
+                "activated": self.activated,
                 "resolution": self.resolution,
                 "resolution_version": self.resolution_version,
                 "overrode": [list(o) for o in self.overrode],
@@ -605,6 +609,9 @@ class Store:
             )
             self._admit(m.as_node())
             self._manifests[m.content_hash()] = m
+            if self._backing is not None:
+                self._backing.put_manifest(m)
+                self._backing.set_head(scope, m.content_hash())
             self._current[scope] = m
             return m
 
@@ -770,6 +777,8 @@ class Store:
             entries = base._entries
             for node_id, node in puts.items():
                 entries = entries.set(node_id, self._admit(node))
+            for node_id, h in tx.binds.items():
+                entries = entries.set(node_id, h)
             for node_id in tx.deletes:
                 entries = entries.delete(node_id)
             manifest = Manifest.build(
@@ -780,6 +789,7 @@ class Store:
                 note=note,
                 author=tx.author,
                 rebased_from=tx.rebased_from,
+                activated=tx.activated,
                 resolution=base.resolution,
                 resolution_version=base.resolution_version,
                 overrode=tuple(overrode),
@@ -807,7 +817,7 @@ class Store:
         policy = live.resolution
 
         def versions(name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-            ours = puts[name].content_hash() if name in puts else None
+            ours = puts[name].content_hash() if name in puts else tx.binds.get(name)
             return base.hash_of(name), ours, live.hash_of(name)
 
         def authors(names) -> Dict[str, str]:
@@ -870,8 +880,10 @@ class Transaction:
         self.author = author
         self.rebased_from: Optional[str] = None
         self.puts: Dict[str, Node] = {}
+        self.binds: Dict[str, str] = {}  # name -> known content hash, bound without a body in hand
         self.deletes: Set[str] = set()
         self.committed: Optional[Manifest] = None
+        self.activated: Optional[str] = None
 
     def rebase(self) -> Dict[str, Tuple[Optional[Node], Optional[Node], Optional[Node]]]:
         """Clean house after an unpleasant surprise. Moves this transaction's
@@ -896,6 +908,7 @@ class Transaction:
                 self._store.get_by_hash(theirs_h) if theirs_h else None,
             )
             self.puts.pop(name, None)
+            self.binds.pop(name, None)
             self.deletes.discard(name)
         if self.rebased_from is None:
             self.rebased_from = self.base.content_hash()
@@ -904,7 +917,18 @@ class Transaction:
 
     @property
     def touched(self) -> frozenset:
-        return frozenset(self.puts) | frozenset(self.deletes)
+        return frozenset(self.puts) | frozenset(self.binds) | frozenset(self.deletes)
+
+    def bind(self, node_id: str, content_hash: str) -> None:
+        """Bind a name to an identity the store already knows, without a body
+        in hand — how an activation restores a version whose bytes may be on
+        disk or released. The hash must be known (its skeleton at least)."""
+        if self.committed is not None:
+            raise RuntimeError("transaction already committed")
+        self._store._skeleton_of(content_hash)  # raises KeyError if unknown
+        self.deletes.discard(node_id)
+        self.puts.pop(node_id, None)
+        self.binds[node_id] = content_hash
 
     def put(self, node: Node) -> str:
         """Stage a node under its own id. Returns its content hash."""

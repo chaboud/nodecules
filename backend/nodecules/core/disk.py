@@ -126,6 +126,7 @@ class DiskBacking(Backing):
             author=raw.get("author", ""),
             rebased_from=raw.get("rebased_from"),
             merge_parent=raw.get("merge_parent"),
+            activated=raw.get("activated"),
             resolution=raw.get("resolution", "single-authority"),
             resolution_version=raw.get("resolution_version", 1),
             overrode=tuple(tuple(o) for o in raw.get("overrode", [])),

@@ -280,7 +280,7 @@ class Generator:
             route=g.route,
             omitted=list(g.omitted),
             lost=list(g.lost),
-            attempts=g.attempts,
+            attempts=g.attempts if g.attempts > 1 else None,
             error=g.error,
         )
 

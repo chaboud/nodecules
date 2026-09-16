@@ -455,7 +455,8 @@ nodes fetched from disk on read. Eviction: LRU on system-held refs.
 **Lossless** — drop in-memory copy when refcount → 0; next read
 reloads from disk. Bound configurable per scope.
 
-**Disk (durable storage).** Per-kind retention rules drive which
+**Disk (durable storage).** *Built 2026-09-16 as `core/disk.py`: see
+the PR plan entry.* Per-kind retention rules drive which
 on-disk nodes the system holds refs to. Refcount mechanics apply
 equally to disk. Pruning is opportunistic and surfaceable: queued,
 UI shows what will be freed, reversible until commit.
@@ -1155,6 +1156,21 @@ form), `core/llm_realization.py` (any `ToolAwareProvider` as a
 `follow`, `present`, `view_for`, `fieldwise_merge`, `open_collaboration`.
 4 tests; `demos/table_attention.py`. A deadlock in `set_resolution` on a
 fresh scope was found and fixed on the way.
+
+### Persistence, activation, routing, tracking, and the inspector — SHIPPED (2026-09-16/17)
+`core/disk.py`: a `Backing` over a directory (bodies, skeletons,
+manifests, heads by hash; atomic writes; reads verify), sparse load,
+write-through before the head moves, `evict` (lossless) vs `prune`
+(release everywhere) — §12 built. `core/activation.py`: markers as
+decoration nodes naming manifests; activation as a forward commit that
+binds the target's entries by hash (`Transaction.bind`) with `activated`
+on the manifest — §14 and the behaviour-as-data rollback built.
+`core/generation.py`: optional edges, `Routed` and a router realization
+(§18 as graph structure), the `failed` outcome with retry as a param,
+root causes carried to consumers. `core/tracking.py`: an event log
+outside the store with an injected clock and sinks, listening to every
+commit and production; `lineage` — §21 built. `demos/inspector/`: a
+local web app over all of it. 13 tests; 472 total.
 
 ### PR-r5b: Generation engine — dirty propagation and settling nodes
 Change-driven recook (today production is pull-only), routing kinds

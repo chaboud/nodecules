@@ -24,5 +24,7 @@ cd backend && PYTHONPATH=. python3 ../demos/chat_live_graph.py
 | `stenota_remake.py` | the meeting graph (audio → asr, diar → turns → windowed claims) through the store with receipts, on mock realizations here and real ones on a laptop | not yet — stenota `HARDWARE-TODO.md` H11 is the real-weights half |
 | `toy_keyhole.py` | simulated observations appended to a strip on a tick; fast, slow, and inner loops as recipes; behavior templates as nodes with rollback | not yet — needs a tick loop and marker manifests |
 
+| `inspector/` | **the inspector**: a local web app over a disk-backed store — scopes, history, the graph drawn from edges, every name with its state and residency, node data you can edit and commit, receipts and lineage, produce, evict and prune, mark and activate a version, set the write policy, append a message and get a reply, and the event log | runs: `python3 ../demos/inspector/server.py --demo` then open http://127.0.0.1:8765/ |
+
 `common.py` holds what the demos share: an echo provider, a receipt
 printer, and a text presenter for frames.

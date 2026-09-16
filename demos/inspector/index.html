@@ -1,0 +1,142 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>nodecules inspector</title>
+<style>
+  :root { --bg:#fafaf7; --ink:#1d1d1b; --mute:#6b6b66; --line:#dcdcd6; --acc:#2a5db0; --warn:#a0522d; --ok:#2e7d32; --pane:#ffffff; }
+  * { box-sizing:border-box } body { margin:0; font:13px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color:var(--ink); background:var(--bg) }
+  header { display:flex; gap:16px; align-items:baseline; padding:8px 14px; border-bottom:1px solid var(--line); background:var(--pane) }
+  header h1 { font-size:15px; margin:0 } header .mute { color:var(--mute) }
+  main { display:grid; grid-template-columns: 260px 1fr 380px; grid-template-rows: 1fr 180px; height: calc(100vh - 38px) }
+  section { overflow:auto; border-right:1px solid var(--line); background:var(--pane); padding:8px 10px }
+  section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute); margin:8px 0 6px }
+  #events { grid-column: 1 / 4; border-top:1px solid var(--line); border-right:0; font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px }
+  .row { padding:3px 6px; border-radius:4px; cursor:pointer } .row:hover { background:#f0f0ea } .row.sel { background:#e6eefb }
+  .hash { font-family: ui-monospace, Menlo, monospace; color:var(--mute) }
+  .k { color:var(--mute) } .warn { color:var(--warn) } .ok { color:var(--ok) }
+  textarea { width:100%; min-height:140px; font-family: ui-monospace, Menlo, monospace; font-size:12px; border:1px solid var(--line); border-radius:4px; padding:6px }
+  input, select { font:inherit; border:1px solid var(--line); border-radius:4px; padding:4px 6px }
+  button { font:inherit; border:1px solid var(--line); background:#f4f4ef; border-radius:4px; padding:4px 10px; cursor:pointer } button.primary { background:var(--acc); color:#fff; border-color:var(--acc) }
+  .actions { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 }
+  svg { width:100%; height:320px; border:1px solid var(--line); border-radius:4px; background:#fff }
+  .node rect { fill:#fff; stroke:#999; rx:4 } .node.sel rect { stroke:var(--acc); stroke-width:2 } .node text { font-size:11px } .node.absent rect { stroke-dasharray:3 2 } .node.ext rect { fill:#f4f4ef }
+  .edge { stroke:#bbb; fill:none; marker-end:url(#arrow) } .edge.optional { stroke-dasharray:4 3 }
+  pre { white-space:pre-wrap; word-break:break-all; margin:4px 0; background:#f7f7f2; padding:6px; border-radius:4px; font-size:11.5px }
+  .ev { display:grid; grid-template-columns: 40px 170px 180px 1fr; gap:8px; padding:2px 6px; border-bottom:1px solid #f0f0ea }
+  .badge { display:inline-block; padding:0 6px; border-radius:10px; background:#eee; font-size:11px; margin-left:4px }
+</style></head>
+<body>
+<header><h1>nodecules inspector</h1><span class="mute" id="where"></span><span class="mute">store · history · nodes · receipts · activation · events</span></header>
+<main>
+  <section id="left">
+    <h2>Scopes</h2><div id="scopes"></div>
+    <h2>History <span class="mute" id="histscope"></span></h2><div id="history"></div>
+  </section>
+  <section id="center">
+    <h2>Graph <span class="mute" id="graphtitle"></span></h2>
+    <svg id="graph"><defs><marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#bbb"/></marker></defs></svg>
+    <h2>Names in this manifest</h2><div id="names"></div>
+  </section>
+  <section id="right">
+    <h2>Node <span class="mute" id="nodename"></span></h2>
+    <div id="nodemeta" class="mute"></div>
+    <div class="actions">
+      <button class="primary" id="produce">produce</button>
+      <button id="save">commit edit</button>
+      <button id="evict">evict</button>
+      <button id="prune">prune</button>
+      <button id="delete">delete name</button>
+    </div>
+    <div><span class="k">kind</span> <input id="kind" size="18"> <span class="k">author</span> <input id="author" value="you" size="10"></div>
+    <textarea id="data" placeholder="data (JSON)"></textarea>
+    <details><summary>edges (JSON)</summary><textarea id="edges" style="min-height:80px"></textarea></details>
+    <h2>Receipt</h2><pre id="receipt">—</pre>
+    <h2>Lineage</h2><pre id="lineage">—</pre>
+    <h2>Activation</h2>
+    <div class="actions">
+      <input id="marklabel" placeholder="label" size="12"><button id="mark">mark this manifest</button>
+      <select id="marks"></select><button id="activate">activate</button>
+      <select id="policy"><option>single-authority</option><option>last-writer-wins</option><option>merge</option></select><button id="setpolicy">set policy</button>
+    </div>
+    <h2>Say (chat scopes)</h2>
+    <div class="actions"><input id="saytext" placeholder="a user message" size="28"><button id="say">append and produce reply</button></div>
+  </section>
+  <section id="events"><h2>Events <span class="mute" id="evcount"></span></h2><div id="evlist"></div></section>
+</main>
+<script>
+const S = { scope:null, hash:null, name:null, manifest:null };
+const $ = id => document.getElementById(id);
+const api = async (path, body) => { const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)} : undefined); const j = await r.json(); if (j.error) { alert(j.error); throw new Error(j.error); } return j; };
+const short = h => h ? h.slice(0,10) : '';
+
+async function loadScopes() {
+  const scopes = await api('/api/scopes');
+  $('scopes').innerHTML = scopes.map(s => `<div class="row ${s.scope===S.scope?'sel':''}" data-scope="${s.scope}">${s.scope} <span class="badge">seq ${s.seq}</span> <span class="badge">${s.resolution}</span></div>`).join('');
+  [...$('scopes').querySelectorAll('.row')].forEach(el => el.onclick = () => selectScope(el.dataset.scope));
+  if (!S.scope && scopes.length) selectScope(scopes[0].scope);
+}
+async function selectScope(scope) {
+  S.scope = scope; $('histscope').textContent = scope;
+  const hist = await api('/api/history?scope=' + encodeURIComponent(scope));
+  $('history').innerHTML = hist.map(m => `<div class="row ${m.hash===S.hash?'sel':''}" data-hash="${m.hash}">seq ${m.seq} <span class="hash">${short(m.hash)}</span> <span class="k">${m.author||'-'}</span> ${m.note||''}${m.activated?' <span class="badge">activation</span>':''}${m.merge_parent?' <span class="badge">merge</span>':''}</div>`).join('');
+  [...$('history').querySelectorAll('.row')].forEach(el => el.onclick = () => selectManifest(el.dataset.hash));
+  if (!hist.find(m => m.hash === S.hash)) await selectManifest(hist[0].hash); else await selectManifest(S.hash);
+  await loadScopes(); await loadEvents();
+}
+async function selectManifest(hash) {
+  S.hash = hash; const m = await api('/api/manifest?hash=' + hash); S.manifest = m;
+  [...$('history').querySelectorAll('.row')].forEach(el => el.classList.toggle('sel', el.dataset.hash === hash));
+  $('graphtitle').textContent = `${m.scope} @ seq ${m.seq}`;
+  $('names').innerHTML = m.entries.map(e => `<div class="row ${e.name===S.name?'sel':''}" data-name="${e.name}">${e.name} <span class="badge">${e.kind||''}</span> <span class="badge">${e.state}</span> <span class="k">${e.residency||''}</span></div>`).join('');
+  [...$('names').querySelectorAll('.row')].forEach(el => el.onclick = () => selectNode(el.dataset.name));
+  $('marks').innerHTML = Object.entries(m.marks).map(([l,h]) => `<option value="${l}">${l} → ${short(h)}</option>`).join('') + `<option value="${m.hash}">this manifest (seq ${m.seq})</option>`;
+  drawGraph(m);
+  if (S.name && m.entries.find(e => e.name === S.name)) await selectNode(S.name);
+}
+function drawGraph(m) {
+  const svg = $('graph'); const W = svg.clientWidth || 700; svg.setAttribute('viewBox', `0 0 ${W} 320`);
+  const names = m.entries.filter(e => !e.name.startsWith('envelope:') && !e.name.startsWith('markers/')).map(e => e.name);
+  const byName = Object.fromEntries(m.entries.map(e => [e.name, e]));
+  const ext = new Set(); const deps = {};
+  for (const n of names) { deps[n] = []; for (const e of (byName[n].edges||[])) { const t = e.scope ? `${e.scope}:${e.target}` : e.target; if (e.scope) ext.add(t); deps[n].push({t, optional:e.optional, role:e.role}); } }
+  const depth = {}; const d = n => { if (depth[n] !== undefined) return depth[n]; depth[n] = 0; for (const {t} of (deps[n]||[])) depth[n] = Math.max(depth[n], (names.includes(t) ? d(t) : 0) + 1); return depth[n]; };
+  names.forEach(d); [...ext].forEach(x => depth[x] = 0);
+  const cols = {}; Object.entries(depth).forEach(([n, k]) => (cols[k] = cols[k] || []).push(n));
+  const ncols = Object.keys(cols).length || 1; const pos = {};
+  Object.entries(cols).forEach(([k, ns]) => ns.sort().forEach((n, i) => { pos[n] = { x: 20 + k * ((W - 200) / Math.max(ncols - 1, 1)), y: 20 + i * 46 }; }));
+  let out = svg.querySelector('defs').outerHTML;
+  for (const n of names) for (const {t, optional} of deps[n]) if (pos[t]) out += `<path class="edge ${optional?'optional':''}" d="M${pos[t].x+170},${pos[t].y+14} C${pos[t].x+200},${pos[t].y+14} ${pos[n].x-30},${pos[n].y+14} ${pos[n].x},${pos[n].y+14}"/>`;
+  for (const [n, p] of Object.entries(pos)) { const e = byName[n]; const cls = ext.has(n) ? 'ext' : (e && e.state !== 'Node' ? 'absent' : ''); out += `<g class="node ${cls} ${n===S.name?'sel':''}" data-name="${n}" transform="translate(${p.x},${p.y})"><rect width="170" height="28"/><text x="6" y="12">${n.length>26?n.slice(0,25)+'…':n}</text><text x="6" y="24" fill="#888">${e ? (e.kind||'') + (e.state!=='Node' ? ' · '+e.state : '') : 'other scope'}</text></g>`; }
+  svg.innerHTML = out;
+  svg.querySelectorAll('.node').forEach(g => g.onclick = () => { if (!ext.has(g.dataset.name)) selectNode(g.dataset.name); });
+}
+async function selectNode(name) {
+  S.name = name; const n = await api(`/api/node?hash=${S.hash}&name=${encodeURIComponent(name)}`);
+  [...$('names').querySelectorAll('.row')].forEach(el => el.classList.toggle('sel', el.dataset.name === name));
+  $('graph').querySelectorAll('.node').forEach(g => g.classList.toggle('sel', g.dataset.name === name));
+  $('nodename').textContent = name;
+  $('nodemeta').innerHTML = `${n.state} · <span class="hash">${short(n.content_hash)}</span> · ${n.residency||''}${n.blame ? ` · last changed by <b>${n.blame.author||'-'}</b> at seq ${n.blame.seq} (${n.blame.note})` : ''}`;
+  $('kind').value = n.node ? n.node.kind : '';
+  $('data').value = n.node && 'data' in n.node ? JSON.stringify(n.node.data, null, 2) : '';
+  $('edges').value = n.node ? JSON.stringify(n.node.edges || [], null, 1) : '[]';
+  $('receipt').textContent = n.envelope ? JSON.stringify({outcome:n.envelope.outcome, reproducibility:n.envelope.reproducibility, measured:n.envelope.measured, realization:n.envelope.recipe && n.envelope.recipe.realization, declared:n.envelope.recipe && n.envelope.recipe.declared, route:n.envelope.recipe && n.envelope.recipe.route, omitted:n.envelope.recipe && n.envelope.recipe.omitted, attempts:n.envelope.recipe && n.envelope.recipe.attempts, inputs:n.envelope.inputs, cache_key:short(n.envelope.cache_key)}, null, 1) : 'no receipt: never produced, or a source';
+  $('lineage').textContent = renderLineage(n.lineage, 0);
+}
+function renderLineage(t, ind) { const pad = '  '.repeat(ind); let s = `${pad}${t.id} ${t.kind||''} ${t.residency||''} ${t.receipt ? '[' + t.receipt.outcome + '/' + t.receipt.reproducibility + ']' : ''}\n`; for (const i of (t.inputs||[])) s += renderLineage(i, ind + 1); return s; }
+async function loadEvents() {
+  const evs = await api('/api/events' + (S.scope ? '?scope=' + encodeURIComponent(S.scope) : ''));
+  $('evcount').textContent = `${evs.length} in ${S.scope||'all'}`;
+  $('evlist').innerHTML = evs.slice().reverse().map(e => `<div class="ev"><span class="k">${e.seq}</span><span class="${e.kind.includes('failed')||e.kind.includes('lost')?'warn':(e.kind.includes('cooked')?'ok':'')}">${e.kind}</span><span>${e.node||''}</span><span class="k">${Object.entries(e.detail||{}).filter(([k])=>!['manifest','parent','cache_key'].includes(k)).map(([k,v])=>`${k}=${typeof v==='object'?JSON.stringify(v):v}`).join(' · ')}</span></div>`).join('');
+}
+async function refresh() { await selectScope(S.scope); }
+$('produce').onclick = async () => { const g = await api('/api/produce', {scope:S.scope, name:S.name}); await refresh(); $('receipt').textContent = JSON.stringify(g, null, 1); };
+$('save').onclick = async () => { let data, edges; try { data = $('data').value.trim() ? JSON.parse($('data').value) : null; edges = JSON.parse($('edges').value || '[]'); } catch (e) { alert('data or edges is not valid JSON'); return; } await api('/api/commit', {scope:S.scope, name:S.name, kind:$('kind').value, data, edges, author:$('author').value}); await refresh(); };
+$('delete').onclick = async () => { if (!confirm(`unbind ${S.name} in ${S.scope}?`)) return; await api('/api/commit', {scope:S.scope, name:S.name, delete:true, author:$('author').value}); S.name = null; await refresh(); };
+$('evict').onclick = async () => { const n = S.manifest.entries.find(e => e.name === S.name); await api('/api/evict', {hash:n.hash}); await refresh(); };
+$('prune').onclick = async () => { const n = S.manifest.entries.find(e => e.name === S.name); if (!confirm('release the bytes everywhere? identity and lineage stay')) return; await api('/api/prune', {hash:n.hash}); await refresh(); };
+$('mark').onclick = async () => { await api('/api/mark', {scope:S.scope, label:$('marklabel').value || 'mark', hash:S.hash, author:$('author').value}); await refresh(); };
+$('activate').onclick = async () => { await api('/api/activate', {scope:S.scope, target:$('marks').value, author:$('author').value}); S.hash = null; await refresh(); };
+$('setpolicy').onclick = async () => { await api('/api/resolution', {scope:S.scope, policy:$('policy').value, author:$('author').value}); S.hash = null; await refresh(); };
+$('say').onclick = async () => { await api('/api/say', {scope:S.scope, text:$('saytext').value, author:$('author').value}); $('saytext').value=''; const g = await api('/api/produce', {scope:S.scope, name:'reply'}); S.hash = null; S.name = 'reply'; await refresh(); $('receipt').textContent = JSON.stringify(g, null, 1); };
+api('/api/where').then(w => $('where').textContent = w.store);
+loadScopes();
+</script>
+</body></html>

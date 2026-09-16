@@ -93,7 +93,7 @@ from .strip_access import AccessPattern, AllPattern
 MANIFEST_KIND = "manifest"
 ENVELOPE_KIND = "envelope"
 
-Residency = Literal["ram", "pruned"]
+Residency = Literal["ram", "disk", "pruned"]  # in memory; on the backing only; released
 Resolution = Literal["single-authority", "last-writer-wins", "merge"]
 RESOLUTIONS: Tuple[str, ...] = ("single-authority", "last-writer-wins", "merge")
 
@@ -355,6 +355,42 @@ class Snapshot:
         return scope in self._manifests
 
 
+class Backing:
+    """What a durable tier must provide. `core/disk.py` implements it over a
+    directory; a remote replica tier would implement the same surface.
+    Everything is keyed by content hash except heads, keyed by scope."""
+
+    def put_body(self, node: "Node") -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    def get_body(self, content_hash: str) -> Optional["Node"]:  # pragma: no cover
+        raise NotImplementedError
+
+    def has_body(self, content_hash: str) -> bool:  # pragma: no cover
+        raise NotImplementedError
+
+    def delete_body(self, content_hash: str) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def get_skeleton(self, content_hash: str) -> Optional[Tuple[str, Tuple["Edge", ...]]]:  # pragma: no cover
+        raise NotImplementedError
+
+    def put_manifest(self, manifest: "Manifest") -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def get_manifest(self, content_hash: str) -> Optional["Manifest"]:  # pragma: no cover
+        raise NotImplementedError
+
+    def manifests(self) -> Iterator["Manifest"]:  # pragma: no cover
+        raise NotImplementedError
+
+    def set_head(self, scope: str, content_hash: str) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+    def heads(self) -> Dict[str, str]:  # pragma: no cover
+        raise NotImplementedError
+
+
 class Conflict(Exception):
     """The unpleasant surprise: a commit found the scope moved under it on
     names it also touched, and the scope's resolution policy did not fold
@@ -404,6 +440,73 @@ class Store:
         self._current: Dict[str, Manifest] = {}
         self._manifests: Dict[str, Manifest] = {}
         self._lock = threading.Lock()
+        self._backing: Optional[Backing] = None
+
+    # -- durability ------------------------------------------------------------------
+
+    def attach(self, backing: Backing) -> None:
+        """Give the store a durable tier. Everything already in memory is
+        written through; everything on the backing becomes reachable —
+        manifests and heads are loaded now, bodies stay on disk until read
+        (sparse load, REFERENCE-MODEL §12). From here on a commit is on the
+        backing before the head moves."""
+        with self._lock:
+            self._backing = backing
+            for node in list(self._blobs.values()):
+                backing.put_body(node)
+            for m in list(self._manifests.values()):
+                backing.put_manifest(m)
+            for scope, m in self._current.items():
+                backing.set_head(scope, m.content_hash())
+            for m in backing.manifests():
+                h = m.content_hash()
+                self._manifests.setdefault(h, m)
+                self._admit(m.as_node(), write_through=False)
+                for _name, body_hash in m.entries():
+                    if body_hash not in self._residency:
+                        self._residency[body_hash] = "disk"
+            for scope, head in backing.heads().items():
+                m = self._manifests.get(head)
+                if m is None:
+                    raise ValueError(f"backing names head {head[:12]} for {scope!r} but has no such manifest")
+                self._current.setdefault(scope, m)
+
+    @property
+    def backing(self) -> Optional[Backing]:
+        return self._backing
+
+    def evict(self, content_hash: str) -> None:
+        """Drop the in-memory copy of a body that the backing holds. Lossless:
+        the next read fetches it back. Residency becomes `disk`."""
+        if self._backing is None or not self._backing.has_body(content_hash):
+            raise ValueError(f"{content_hash[:12]} is not on a backing; use prune to release it")
+        self._blobs.pop(content_hash, None)
+        self._residency[content_hash] = "disk"
+
+    def _fetch(self, content_hash: str) -> Optional[Node]:
+        """A body from memory, or from the backing (and then memory)."""
+        r = self._residency.get(content_hash)
+        if r == "ram":
+            return self._blobs.get(content_hash)
+        if r == "disk" and self._backing is not None:
+            node = self._backing.get_body(content_hash)
+            if node is None:
+                return None
+            self._blobs[content_hash] = node
+            self._skeletons[content_hash] = (node.kind, node.edges)
+            self._residency[content_hash] = "ram"
+            return node
+        return None
+
+    def _skeleton_of(self, content_hash: str) -> Tuple[str, Tuple[Edge, ...]]:
+        sk = self._skeletons.get(content_hash)
+        if sk is None and self._backing is not None:
+            sk = self._backing.get_skeleton(content_hash)
+            if sk is not None:
+                self._skeletons[content_hash] = sk
+        if sk is None:
+            raise KeyError(f"no skeleton for {content_hash[:12]}")
+        return sk
 
     # -- scopes and snapshots ----------------------------------------------------
 
@@ -432,7 +535,7 @@ class Store:
         return self._manifests.get(content_hash)
 
     def has_body(self, content_hash: str) -> bool:
-        return self._residency.get(content_hash) == "ram"
+        return self._residency.get(content_hash) in ("ram", "disk")
 
     def import_body(self, node: Node) -> str:
         """Admit a body that arrived from another replica."""
@@ -443,6 +546,8 @@ class Store:
         move the scope's head; `merge_head` does that."""
         self._admit(manifest.as_node())
         self._manifests.setdefault(manifest.content_hash(), manifest)
+        if self._backing is not None:
+            self._backing.put_manifest(manifest)
 
     def set_head(self, scope: str, manifest: Manifest) -> None:
         """Point a scope at a known manifest (fast-forward or a merge result).
@@ -450,6 +555,8 @@ class Store:
         with self._lock:
             if manifest.content_hash() not in self._manifests:
                 raise ValueError("unknown manifest")
+            if self._backing is not None:
+                self._backing.set_head(scope, manifest.content_hash())
             self._current[scope] = manifest
 
     def history(self, scope: str) -> Iterator[Manifest]:
@@ -510,12 +617,15 @@ class Store:
         h = manifest.hash_of(node_id)
         if h is None:
             return None
-        node = self._blobs.get(h)
-        if node is not None and self._residency.get(h) == "ram":
+        node = self._fetch(h)
+        if node is not None:
+            if node.id != node_id or node.scope != manifest.scope:
+                # one body, several names: answer under the name that was asked
+                node = node.model_copy(update={"id": node_id, "scope": manifest.scope})
             return node
-        kind, edges = self._skeletons[h]
+        kind, edges = self._skeleton_of(h)
         env = manifest.hash_of(envelope_id(node_id))
-        if env is not None and self._residency.get(env) == "ram":
+        if env is not None and self.has_body(env):
             return Absent(
                 id=node_id,
                 scope=manifest.scope,
@@ -527,10 +637,8 @@ class Store:
         return Lost(id=node_id, scope=manifest.scope, kind=kind, content_hash=h, edges=edges)
 
     def get_by_hash(self, content_hash: str) -> Optional[Node]:
-        """A body by identity, whatever it is named. None if not resident."""
-        if self._residency.get(content_hash) != "ram":
-            return None
-        return self._blobs.get(content_hash)
+        """A body by identity, whatever it is named. None if released."""
+        return self._fetch(content_hash)
 
     def resolve(self, snapshot: Snapshot, scope: str, node_id: str) -> Optional[Resolved]:
         return self.get(snapshot.manifest(scope), node_id)
@@ -558,7 +666,7 @@ class Store:
         own = manifest.hash_of(node_id)
         if own is None:
             raise DanglingEdge(f"{scope}:{node_id} is not bound in manifest seq {manifest.seq}")
-        _kind, edges = self._skeletons[own]  # present for every admitted identity
+        _kind, edges = self._skeleton_of(own)
         return own, edges
 
     def _composed(
@@ -614,9 +722,12 @@ class Store:
         """Drop a body's data; keep its skeleton. Identity, manifests,
         lineage, and composed hashes are untouched — this is a residency
         change, not a content change."""
-        if content_hash not in self._blobs:
+        if self._residency.get(content_hash) not in ("ram", "disk"):
             raise KeyError(content_hash)
-        self._blobs.pop(content_hash)
+        self._skeleton_of(content_hash)  # keep the skeleton in memory before the bytes go
+        self._blobs.pop(content_hash, None)
+        if self._backing is not None and self._backing.has_body(content_hash):
+            self._backing.delete_body(content_hash)
         self._residency[content_hash] = "pruned"
 
     def restore(self, node: Node) -> str:
@@ -628,16 +739,20 @@ class Store:
             raise ValueError(f"{h[:12]} is not a pruned identity in this store")
         self._blobs[h] = node
         self._residency[h] = "ram"
+        if self._backing is not None:
+            self._backing.put_body(node)
         return h
 
     # -- internal ----------------------------------------------------------------
 
-    def _admit(self, node: Node) -> str:
+    def _admit(self, node: Node, *, write_through: bool = True) -> str:
         h = node.content_hash()
-        if h not in self._blobs:
+        if self._residency.get(h) != "ram":
             self._blobs[h] = node
             self._skeletons[h] = (node.kind, node.edges)
             self._residency[h] = "ram"
+            if write_through and self._backing is not None:
+                self._backing.put_body(node)
         return h
 
     def _commit(self, tx: "Transaction", note: str) -> Manifest:
@@ -671,6 +786,10 @@ class Store:
             )
             self._admit(manifest.as_node())
             self._manifests[manifest.content_hash()] = manifest
+            if self._backing is not None:
+                # durable before the head moves (§15)
+                self._backing.put_manifest(manifest)
+                self._backing.set_head(tx.scope, manifest.content_hash())
             self._current[tx.scope] = manifest
             return manifest
 
@@ -824,6 +943,7 @@ class Transaction:
 
 __all__ = [
     "Absent",
+    "Backing",
     "Conflict",
     "MergeFn",
     "RESOLUTIONS",

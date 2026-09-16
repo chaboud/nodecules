@@ -1,7 +1,7 @@
 # nodecules: status
 
 Where the build stands, measured against what it is supposed to be. Updated
-2026-09-17 at the head of `claude/nodecules-v2-naming-matching-vmkexv`.
+2026-09-18 at the head of `claude/nodecules-v2-naming-matching-vmkexv`.
 `WHY-WHAT-HOW.md` explains the design; this file says how much of it exists.
 
 Status words: **built** means code with tests on the branch; **partial**
@@ -20,11 +20,11 @@ system." Each word, honestly:
 | Universal (one node model for everything) | partial | One node shape for data, recipes, params, envelopes, manifests, timelines, frames, participants, attention. Everything the substrate itself produces is a node. | Kinds are bare strings with no registry or schemas. Descriptions, claims, hallmarks, executors, plans, and observations are still Pydantic objects outside the store, not store kinds. |
 | Substitution-friendly | built at the decision level, partial in execution | Two-layer identity. Descriptions with a reference realization. The two-part satisfies judgment, measured on a bench where the impostor was the cheapest candidate. Receipts with an identity axis and a reproducibility axis. A plan's bindings substitute a realization and the receipt says `via-substitute`. | Routing kinds that substitute an upstream automatically. Substitution across machines. An audition against real model weights. |
 | Abstract representation | built, with a known gap | Declarations are kind plus edges with symbolic access patterns; resolution happens at production time; what was read goes in the receipt, never back into the declaration. Graphs are plain JSON-able nodes. | The relative and range-relative patterns ("the entry before mine", "the last five minutes") were cut in PR-r1 and have not been restored. No ordinal axis for strips indexed by count. |
-| Distributable | designed, with the pieces modelled | Placement decides where each node runs, from executor advertisements, data pins, lock levels, and a cost model, and the plan is an artifact. Replicas commit locally and converge hash for hash. Residency is separate from identity, with a disk tier. | Nothing crosses a process boundary. No transport. A plan does not run on the executor it names. No remote replica tier. Distribution is decided and modelled, not performed. |
+| Distributable | partial | Placement decides where each node runs and the plan is an artifact. Replicas commit locally and converge hash for hash. Residency is separate from identity, with a disk tier. A production that cannot run here becomes a request node in the store that any agent with the realization fulfils, so work moves between machines through a shared directory or a synced replica with no transport of its own. | No transport. A plan does not run on the executor it names. No remote replica tier. |
 | Async | partial | Realizations are async functions and production is an async call. | Production is pull-only and sequential: independent nodes do not cook concurrently, and nothing recooks when an input changes without being asked. The scheduler on the temporal branch is single-threaded by design. |
 | High performance | not established | In-process numbers on the store from one container: about 7,900 single-node commits per second, 4.6 µs per read through a manifest, a 10,000-deep chain hashed in 186 ms, sixty ticks of ten participants' updates in 17 ms of a second. | No profiling of production. Pure Python with pydantic on the hot path. No disk. The numbers say the store is not the bottleneck for a demo; they say nothing about real load. |
-| LLM integrated | partial | A single adapter turns any tool-aware provider into a realization, with unseeded calls marked non-reproducible. The chat demo runs a graph through it. | The only provider implementing the tool-aware interface is the mock. The real adapters (Ollama, Anthropic, Bedrock) belong to the legacy chat-shaped interface and its database. No tool-use loop. No test has touched a real model. |
-| Agentic | enabled, not built | Everything an agent would change is data it can commit: recipes, params, elements, its own attention. The chat demo edits a persona by commit. Agents are participants at the table. | No agent runtime: no loop from model output to tool calls to commits. No write grants, so nothing stops an agent from rewriting what it should not; the self-modification carve-out is a principle in the vault, not code. No journal beyond the author field on manifests. |
+| LLM integrated | partial | A single adapter turns any tool-aware provider into a realization, with unseeded calls marked non-reproducible. The chat demo runs a graph through it. A step that needs a model this process lacks is deferred as a request node, so a machine with an inference engine can advance the graph. | The only provider implementing the tool-aware interface is the mock. The real adapters belong to the legacy chat-shaped interface and its database. No tool-use loop. No test has touched a real model. |
+| Agentic | enabled, not built | Everything an agent would change is data it can commit: recipes, params, elements, its own attention. The chat demo edits a persona by commit. Agents are participants at the table. A decision is a node, its presentations are produced for a surface and a person, and the business graph advances exactly once when the choice is final. Pending requests are the handoff between agents. | No agent runtime: no loop from model output to tool calls to commits. No write grants; the self-modification carve-out is a principle in the vault, not code. No responsible adult. |
 | Multi-user | built in-process | Authors on manifests. Three resolution policies for concurrent writes. Conflicts name base, ours, and theirs. Rebase and blame. Replicas that converge in either sync order. Participants, attention with expiry, optional following, field-wise merge of concurrent edits. Two demos. | No network. No access control or per-region grants. No responsible adult. No head-acceptance policy beyond convergence. No signed manifests. |
 | Robust | partial: durable and failure-tolerant, not yet self-limiting | 472 tests on pydantic and pytest alone, running in about four seconds. Convergence is tested as a property. A realization that lies about determinism is flagged. The store persists to disk with write-through before the head moves, loads sparsely, and refuses tampered files. A failing realization is a state with an error, not a crash, and retry is a parameter. Three real bugs found by tests on the way (a recursion limit, a deadlock, a stale-body read) and fixed the same day. | Nothing is ever pruned by policy, so the store grows without bound. No concurrency tests, no fuzzing. |
 | Extensible | built | Kinds are open. Merge rules, assay metrics, and realizations register by name. Access patterns are a discriminated union that admits new members additively. Policies are data on the manifest. Routing is graph structure: a router node with optional edges and a realization that reports its choice. | No kind registry with schemas, so a presenter cannot ask what kinds it can render. No discovery for realizations; the inventory is assembled by hand. |
@@ -58,11 +58,13 @@ total, plus the tests.
 | Activation: markers name versions; activating is a forward commit | `activation.py` | 2 | 2026-09-16 |
 | Routing as graph structure, failure as a state, retry, tracking, lineage | `generation.py`, `tracking.py` | 4 | 2026-09-16 |
 | The inspector: look, edit, produce, activate, watch | `demos/inspector/` | (smoke) | 2026-09-17 |
+| Decisions and presentations; deferral of a step as a request node | `decisions.py`, `deferral.py`, `generation.py` | 4 | 2026-09-18 |
 
 Also on the branch: three measured benches under `spikes/` (identity,
-matching, placement), three running demos under `demos/` including the
-inspector, the spec (`REFERENCE-MODEL.md`), and `WHY-WHAT-HOW.md`.
-Thirty-one decision records in the vault, two of them superseded.
+matching, placement), four running demos under `demos/` including the
+inspector and the table chat, the spec (`REFERENCE-MODEL.md`), and
+`WHY-WHAT-HOW.md`. Thirty-three decision records in the vault, two of
+them superseded.
 
 Two things were built and withdrawn the same day, and are recorded as
 such: a generation pin on edges (it made rigidity spread through the
@@ -95,8 +97,8 @@ the retention floor they require. An ordinal axis.
 **Models and agents.** A real provider behind the tool-aware interface. A
 tool-use loop. Write grants and the enforced carve-out.
 
-**The table.** Decisions and their presentations. The responsible adult.
-A presenter beyond text. Sync estimation between clocks.
+**The table.** The responsible adult. A presenter beyond text. Sync
+estimation between clocks.
 
 **Trust and the market.** Signed manifests. Attestation. Escrow receipts.
 A description whose reference cannot be run by the buyer. An audition
@@ -113,10 +115,9 @@ more real and removes a "not" from the table above. The founder decides.
 1. ~~**Persistence.**~~ Done 2026-09-16, with loading, editing and
    inspection (the inspector), activation, routing, and tracking, in the
    order the founder set.
-2. **Decisions and presentations on the table.** The table chat demo, and
-   with it the choice-architecture half of the experience layer: a
-   decision kind, a presentation chosen for the surface, an input strip,
-   the business graph advancing once.
+2. ~~**Decisions and presentations on the table.**~~ Done 2026-09-18, with
+   deferral: a step that needs a model this process lacks becomes a
+   request node another agent fulfils.
 3. **A real model behind the tool-aware interface, and a tool-use loop.**
    Turns the chat demo into something that answers, and gives an agent a
    way to act, which is the first step toward the butler.
@@ -136,6 +137,7 @@ The real-weights canary runs on a laptop in parallel with all of this.
 cd backend && python3 -m pytest tests/temporal/ -q       # the suite
 cd backend && PYTHONPATH=. python3 ../demos/chat_live_graph.py
 cd backend && PYTHONPATH=. python3 ../demos/table_attention.py
+cd backend && PYTHONPATH=. python3 ../demos/table_chat.py
 cd backend && PYTHONPATH=. python3 ../demos/inspector/server.py --demo   # then open http://127.0.0.1:8765/
 cd spikes/placement-bench && python3 bench.py             # measured placement
 ```

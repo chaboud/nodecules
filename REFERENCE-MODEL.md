@@ -1172,6 +1172,21 @@ outside the store with an injected clock and sinks, listening to every
 commit and production; `lineage` — §21 built. `demos/inspector/`: a
 local web app over all of it. 13 tests; 472 total.
 
+### Decisions, presentations, and deferral — SHIPPED (2026-09-18)
+`core/decisions.py`: a decision is a business node (prompt, options with
+facts, needs, stakes, deadline); a presentation is produced from it for
+one surface and person by a realization that reads the answers so far
+and derives the current step — all at once where the surface allows, a
+tournament of rounds where it does not, a spoken form where the person
+does not see; a business node advances exactly once, when the choice
+is final; steps are elements for the table. `core/deferral.py` and the
+generator's `defer` flag: a production whose realization is not in this
+inventory becomes a `request` node and the outcome `pending`; anything
+with the realization `fulfil`s it through the store and the next
+production is a cache hit — the founder's "graph sub-events" and
+dispatch across machines without a transport. 4 tests; 476 total.
+`demos/table_chat.py` runs all of it.
+
 ### PR-r5b: Generation engine — dirty propagation and settling nodes
 Change-driven recook (today production is pull-only), routing kinds
 (§18) as the `via-substitute` source, executing on the assigned

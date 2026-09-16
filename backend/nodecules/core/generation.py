@@ -72,7 +72,7 @@ RECIPE_ROLE = "recipe"
 PARAMS_ROLE = "params"
 RECIPE_TEMPLATE_KIND = "recipe.template"
 
-Outcome = Literal["exact", "via-substitute", "equivalent", "lost", "failed"]
+Outcome = Literal["exact", "via-substitute", "equivalent", "lost", "failed", "pending"]
 Reproducibility = Literal["exact", "equivalent"]
 
 CookFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[Any]]
@@ -164,6 +164,7 @@ class Generation(BaseModel):
     route: Optional[Dict[str, str]] = None  # {"chose": role, "primary": role} when a router ran
     attempts: int = 0
     error: Optional[str] = None
+    request: Optional[str] = None  # the request node written when the production was deferred
     note: str = ""
 
 
@@ -215,7 +216,9 @@ class Generator:
         author: str = "generator",
         plan_hash: Optional[str] = None,
         tracker: Any = None,
+        defer: bool = False,
     ) -> None:
+        self.defer = defer  # a missing realization becomes a request node instead of an error (core/deferral.py)
         self.tracker = tracker  # core/tracking.py's Tracker, or anything with .record(kind, scope, node, **detail)
         self.store = store
         if isinstance(realizations, Mapping):
@@ -239,7 +242,7 @@ class Generator:
         for sc, nid in order:
             result = await self._produce_one(sc, nid, problems)
             self._track(result)
-            if result.outcome in ("failed", "lost"):
+            if result.outcome in ("failed", "lost", "pending"):
                 problems[f"{sc}:{nid}"] = result
         assert result is not None
         return result
@@ -269,6 +272,8 @@ class Generator:
         if self.tracker is None:
             return
         how = "cache-hit" if g.cache_hit else ("cooked" if g.cooked else g.outcome)
+        if g.outcome == "pending" and g.note == "already requested":
+            return
         self.tracker.record(
             f"produce.{how}",
             g.scope,
@@ -313,6 +318,8 @@ class Generator:
                         continue
                     if child in on_path:
                         raise Cycle(f"{child[0]}:{child[1]} reaches itself")
+                    if e.optional and self.store.get(self.store.current(child[0]), child[1]) is None:
+                        continue  # an optional input that does not exist yet is simply omitted
                     stack.append((child, False))
             else:
                 on_path.discard(key)
@@ -354,7 +361,7 @@ class Generator:
         declared = template.data["realization"]
         used = self.bindings.get(node_id, declared)
         realization = self.realizations.get(used)
-        if realization is None:
+        if realization is None and not self.defer:
             raise NoRealization(f"{node_id} needs realization {used!r}; inventory has {sorted(self.realizations)}")
 
         inputs: Dict[str, Any] = {}
@@ -371,6 +378,8 @@ class Generator:
                 # unavailable now, or produced just now and failed/lost: a stale body does not count
                 if e.optional:
                     omitted.append(ref)
+                elif upstream is not None and upstream.outcome == "pending":
+                    return Generation(scope=scope, node_id=node_id, outcome="pending", note=f"waiting on {ref}", inputs=tuple(resolved))
                 elif upstream is not None and upstream.outcome == "failed":
                     return Generation(scope=scope, node_id=node_id, outcome="failed", error=f"input {ref} failed: {upstream.error}", inputs=tuple(resolved))
                 elif upstream is not None:
@@ -402,6 +411,8 @@ class Generator:
 
         prior_env = self.store.get(manifest, envelope_id(node_id))
         prior = prior_env if isinstance(prior_env, Node) and prior_env.data.get("cache_key") == cache_key else None
+        if realization is None and not (prior is not None and isinstance(cur, Node) and cur.data is not None):
+            return self._defer(scope, node_id, used, declared, resolved, params, cache_key, manifest)
         if prior is not None and isinstance(cur, Node) and cur.data is not None:
             return Generation(
                 scope=scope,
@@ -505,6 +516,28 @@ class Generator:
             route=route,
             attempts=attempts,
         )
+
+    def _defer(self, scope: str, node_id: str, used: str, declared: str, resolved: List[ResolvedInput], params: Dict[str, Any], cache_key: str, manifest: Manifest) -> Generation:
+        """No realization here: write a request node for whoever has one."""
+        from .deferral import REQUEST_KIND, request_id
+
+        rid = request_id(node_id)
+        existing = self.store.get(manifest, rid)
+        payload = {
+            "for": node_id,
+            "realization": used,
+            "declared": declared,
+            "inputs": {f"{r.scope}:{r.name}": r.content_hash for r in resolved},
+            "params": params,
+            "cache_key": cache_key,
+            "status": "pending",
+        }
+        if isinstance(existing, Node) and existing.data == payload:
+            return Generation(scope=scope, node_id=node_id, outcome="pending", request=rid, cache_key=cache_key, realization=used, declared_realization=declared, inputs=tuple(resolved), note="already requested")
+        tx = self.store.transaction(scope, author=self.author)
+        tx.put(Node(id=rid, kind=REQUEST_KIND, scope=scope, data=payload))
+        committed = tx.commit(note=f"request {node_id}")
+        return Generation(scope=scope, node_id=node_id, outcome="pending", request=rid, cache_key=cache_key, realization=used, declared_realization=declared, inputs=tuple(resolved), manifest=committed)
 
     def _read(self, from_scope: str, edge: Edge):
         scope = edge.scope or from_scope

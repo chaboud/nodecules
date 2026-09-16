@@ -64,7 +64,7 @@ total, plus the tests.
 Also on the branch: three measured benches under `spikes/` (identity,
 matching, placement), four running demos under `demos/` including the
 inspector and the table chat, the spec (`REFERENCE-MODEL.md`), and
-`WHY-WHAT-HOW.md`. Thirty-three decision records in the vault, two of
+`WHY-WHAT-HOW.md`. Thirty-four decision records in the vault, two of
 them superseded.
 
 Two things were built and withdrawn the same day, and are recorded as

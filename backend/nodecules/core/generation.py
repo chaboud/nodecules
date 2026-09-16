@@ -483,6 +483,16 @@ class Generator:
             executor = getattr(self, "_executors", {}).get(node_id)
             if executor is not None:
                 recipe_record["executor"] = executor
+        # A request written for this node by a producer that lacked the realization
+        # (core/deferral.py) is answered by this production: clear it in the same
+        # commit and say who did.
+        from .deferral import request_id
+
+        rid = request_id(node_id)
+        pending_request = isinstance(self.store.get(manifest, rid), Node)
+        if pending_request:
+            recipe_record["fulfilled_by"] = self.author
+            recipe_record["request"] = rid
         envelope = make_envelope(
             produced,
             recipe=recipe_record,
@@ -496,7 +506,9 @@ class Generator:
         tx = self.store.transaction(scope, author=self.author)
         tx.put(produced)
         tx.put(envelope)
-        committed = tx.commit(note=f"produce {node_id}")
+        if pending_request:
+            tx.delete(rid)
+        committed = tx.commit(note=f"fulfil {node_id} ({self.author})" if pending_request else f"produce {node_id}")
         return Generation(
             scope=scope,
             node_id=node_id,

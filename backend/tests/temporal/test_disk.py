@@ -67,7 +67,7 @@ def test_a_commit_is_on_disk_before_the_head_moves(tmp_path: Path):
     tx.put(Node(id="x", kind="k", scope=M, data=1))
     m = tx.commit("durable")
     assert backing.get_manifest(m.content_hash()) is not None
-    assert backing.heads() == {M: m.content_hash()}
+    assert backing.heads() == {M: [m.content_hash()]}
     assert backing.has_body(m.hash_of("x"))
     # a brand-new process sees exactly that
     assert load(tmp_path).current(M).content_hash() == m.content_hash()
@@ -136,3 +136,38 @@ def test_a_shared_body_answers_under_the_name_asked():
     m = tx.commit()
     assert s.get(m, "audio-copy.wav").id == "audio-copy.wav"
     assert s.get(m, "audio.wav").id == "audio.wav"
+
+
+def test_a_store_directory_merged_by_git_attaches_to_one_head(tmp_path: Path):
+    """Two machines commit to copies of one store directory; a git merge of
+    the two copies unions the files (every name is a hash, so nothing
+    conflicts) and leaves two candidate heads; attach merges them."""
+    import shutil
+
+    a = Store()
+    a.attach(DiskBacking(tmp_path / "shared"))
+    _graph(a)
+    shutil.copytree(tmp_path / "shared", tmp_path / "spark")
+    spark = load(tmp_path / "spark")
+    tx = spark.transaction(M, author="spark")
+    tx.put(Node(id="answer", kind="k", scope=M, data={"summary": "from the model"}))
+    tx.commit("fulfil")
+    tx = a.transaction(M, author="cloud")
+    tx.put(Node(id="question", kind="k", scope=M, data={"q": "?"}))
+    tx.commit("ask")
+    # "git merge": union of both trees, file by file, never editing a file
+    for src in (tmp_path / "shared", tmp_path / "spark"):
+        for p in src.rglob("*"):
+            if p.is_file():
+                dst = tmp_path / "merged" / p.relative_to(src)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if not dst.exists():
+                    shutil.copy2(p, dst)
+    assert len(DiskBacking(tmp_path / "merged").heads()[M]) == 2
+    merged = load(tmp_path / "merged")
+    head = merged.current(M)
+    assert head.merge_parent is not None
+    assert isinstance(merged.get(head, "answer"), Node) and isinstance(merged.get(head, "question"), Node)
+    assert DiskBacking(tmp_path / "merged").heads()[M] == [head.content_hash()]  # retired both candidates
+    # both machines loading the merged directory agree
+    assert load(tmp_path / "merged").current(M).content_hash() == head.content_hash()

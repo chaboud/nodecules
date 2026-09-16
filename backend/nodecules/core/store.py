@@ -392,7 +392,11 @@ class Backing:
     def set_head(self, scope: str, content_hash: str) -> None:  # pragma: no cover
         raise NotImplementedError
 
-    def heads(self) -> Dict[str, str]:  # pragma: no cover
+    def heads(self) -> Dict[str, List[str]]:  # pragma: no cover
+        """scope -> candidate head hashes. More than one means two writers
+        advanced the scope independently (two machines through a shared
+        directory, say) and the store merges them deterministically on
+        attach."""
         raise NotImplementedError
 
 
@@ -475,11 +479,25 @@ class Store:
                 for _name, body_hash in m.entries():
                     if body_hash not in self._residency:
                         self._residency[body_hash] = "disk"
-            for scope, head in backing.heads().items():
-                m = self._manifests.get(head)
-                if m is None:
-                    raise ValueError(f"backing names head {head[:12]} for {scope!r} but has no such manifest")
-                self._current.setdefault(scope, m)
+            for scope, candidates in backing.heads().items():
+                heads: List[Manifest] = []
+                for head in candidates:
+                    m = self._manifests.get(head)
+                    if m is None:
+                        raise ValueError(f"backing names head {head[:12]} for {scope!r} but has no such manifest")
+                    heads.append(m)
+                if scope in self._current:
+                    heads.append(self._current[scope])
+                if len(heads) == 1:
+                    self._current[scope] = heads[0]
+                else:
+                    from .replica import merge  # local import: replica depends on store
+
+                    merged = heads[0]
+                    for other in heads[1:]:
+                        merged = merge(self, merged, other, author="attach")
+                    self._current[scope] = merged
+                    backing.set_head(scope, merged.content_hash())
 
     @property
     def backing(self) -> Optional[Backing]:

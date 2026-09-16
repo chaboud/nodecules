@@ -15,7 +15,11 @@ Layout under the directory:
     skeletons/<hash>.json   kind and edges only — enough to answer lineage
                             and composed hashes when the body is released
     manifests/<hash>.json   a manifest's fields plus its [name, hash] entries
-    heads/<scope>.json      {"scope": ..., "head": <manifest hash>}
+    heads/<scope>/<hash>    one empty file per candidate head; normally one
+                            per scope. Two machines that advanced the same
+                            scope through a shared or git-merged directory
+                            leave two, and the store merges them on attach.
+                            No file is ever edited, so git never conflicts.
 
 `load(path)` returns a store with manifests and heads in memory and bodies
 on disk until read (sparse load, §12). Attaching a backing to a store that
@@ -27,7 +31,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 from urllib.parse import quote, unquote
 
 from .pmap import PMap
@@ -149,18 +153,48 @@ class DiskBacking(Backing):
 
     # -- heads -----------------------------------------------------------------------
 
-    def _head_path(self, scope: str) -> Path:
-        return self.root / "heads" / f"{quote(scope, safe='')}.json"
+    def _head_dir(self, scope: str) -> Path:
+        return self.root / "heads" / quote(scope, safe="")
 
     def set_head(self, scope: str, content_hash: str) -> None:
-        _write_atomic(self._head_path(scope), {"scope": scope, "head": content_hash})
+        """Record the new head and retire the candidates it descends from.
+        A candidate that is *not* an ancestor (another machine's head we have
+        not merged yet) is left in place for the next attach to merge."""
+        d = self._head_dir(scope)
+        d.mkdir(parents=True, exist_ok=True)
+        new = d / content_hash
+        if not new.exists():
+            new.write_text("")
+        for p in list(d.iterdir()):
+            if p.name != content_hash and self._is_ancestor(p.name, content_hash):
+                p.unlink()
 
-    def heads(self) -> Dict[str, str]:
-        out: Dict[str, str] = {}
-        for p in sorted((self.root / "heads").glob("*.json")):
-            raw = _read(p)
-            if raw is not None:
-                out[unquote(p.stem)] = raw["head"]
+    def _is_ancestor(self, maybe: str, of: str) -> bool:
+        seen = set()
+        stack = [of]
+        while stack:
+            h = stack.pop()
+            if h == maybe:
+                return True
+            if h in seen:
+                continue
+            seen.add(h)
+            raw = _read(self._manifest_path(h))
+            if raw is None:
+                continue
+            for parent in (raw.get("parent"), raw.get("merge_parent")):
+                if parent:
+                    stack.append(parent)
+        return False
+
+    def heads(self) -> Dict[str, List[str]]:
+        out: Dict[str, List[str]] = {}
+        heads = self.root / "heads"
+        for d in sorted(heads.iterdir()) if heads.exists() else []:
+            if d.is_dir():
+                names = sorted(p.name for p in d.iterdir() if p.is_file())
+                if names:
+                    out[unquote(d.name)] = names
         return out
 
 

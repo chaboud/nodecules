@@ -100,9 +100,7 @@ async def test_business_graph_advances_exactly_once_as_answers_land_on_the_input
     assert f"{BIZ}:strips/answers/alice" in env["inputs"]
 
 
-@pytest.mark.asyncio
-async def test_a_step_needing_a_model_nobody_here_has_becomes_a_request_that_something_else_fulfils():
-    store = Store()
+def _declare(store: Store) -> None:
     tx = store.transaction(LIB, author="dev")
     tx.put(Node(id="recipes/consider", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "llm.spark@1", "params": {"system": "Summarise each option in one line."}}))
     tx.put(Node(id="recipes/advance", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "decision.advance@1", "params": {}}))
@@ -112,6 +110,12 @@ async def test_a_step_needing_a_model_nobody_here_has_becomes_a_request_that_som
     tx.put(Node(id="consider/dest", kind="llm.consideration", scope=BIZ, edges=(Edge(target="decisions/dest", role="decision"), Edge(target="recipes/consider", scope=LIB, role=RECIPE_ROLE))))
     tx.put(Node(id="plan/next", kind="business.step", scope=BIZ, edges=(Edge(target="consider/dest", role="choice"), Edge(target="recipes/advance", scope=LIB, role=RECIPE_ROLE))))
     tx.commit("declare")
+
+
+@pytest.mark.asyncio
+async def test_a_step_needing_a_model_nobody_here_has_becomes_a_request_that_something_else_fulfils():
+    store = Store()
+    _declare(store)
     here = Generator(store, [advance_realization()], defer=True)  # no model in this inventory
     out = await here.produce(BIZ, "plan/next")
     assert out.outcome == "pending" and "consider/dest" in out.note
@@ -132,3 +136,32 @@ async def test_a_step_needing_a_model_nobody_here_has_becomes_a_request_that_som
     out = await here.produce(BIZ, "plan/next")
     assert out.cooked and out.node.data["advanced"] and out.node.data["chosen"] == "o3"
     assert (await here.produce(BIZ, "consider/dest")).cache_hit
+
+
+@pytest.mark.asyncio
+async def test_a_producer_that_has_the_realization_clears_the_request_it_answers():
+    """The other way to fulfil: run the generator with the missing realization
+    in inventory (what `handoff/fulfil.py` does). The request goes in the
+    same commit as the answer, and the envelope names who fulfilled it."""
+    from nodecules.core.generation import Realization
+    from nodecules.core.store import envelope_id
+
+    store = Store()
+    _declare(store)
+    here = Generator(store, [advance_realization()], defer=True)
+    out = await here.produce(BIZ, "consider/dest")
+    assert out.outcome == "pending" and len(requests(store, BIZ)) == 1
+
+    async def cook(inputs, params):
+        return {"summaries": {o["id"]: o["label"] for o in inputs["decision"]["options"]}}
+
+    spark = Generator(store, [advance_realization(), Realization(handle="llm.spark@1", cook=cook)], author="spark", defer=True)
+    done = await spark.produce(BIZ, "consider/dest")
+    assert done.cooked and done.outcome == "exact"
+    assert requests(store, BIZ) == []
+    m = store.current(BIZ)
+    env = store.get(m, envelope_id("consider/dest")).data
+    assert env["recipe"]["fulfilled_by"] == "spark" and env["recipe"]["request"] == "requests/consider/dest"
+    assert m.author == "spark" and m.note.startswith("fulfil consider/dest")
+    back = await here.produce(BIZ, "consider/dest")
+    assert back.cache_hit and back.node.data["summaries"]["o9"] == "Option 9"

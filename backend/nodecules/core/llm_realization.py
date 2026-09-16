@@ -9,6 +9,12 @@ the usual source) — and params carry `system`, `model`, `temperature`,
 `max_tokens`, and optional `tools` / `response_schema`. The output is a
 JSON dict: `content`, `tool_calls`, `stop_reason`, `model`.
 
+A node with no `messages` input can still be considered by a model: every
+other input is rendered, by role, as JSON in one user message, so a
+decision, a claim, or a table can be put to a model without a chat in
+front of it. That is the shape of a deferred `consider/...` step
+(core/deferral.py) when a machine with a model picks it up.
+
 Unseeded model calls are perturbing (ADR-0009): `deterministic` defaults
 to False, so their receipts say `equivalent`, and a re-production that
 happens to match does not get promoted to `exact`.
@@ -16,6 +22,7 @@ happens to match does not get promoted to `exact`.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +38,18 @@ def _plain(obj: Any) -> Any:
     return obj
 
 
+def render_inputs(inputs: Dict[str, Any]) -> str:
+    """Inputs by role as one user message: a heading per role and the
+    data as JSON. Deterministic (sorted keys) so the same inputs render
+    the same prompt."""
+    parts: List[str] = []
+    for role in sorted(inputs):
+        if role == "messages":
+            continue
+        parts.append(f"## {role}\n{json.dumps(_plain(inputs[role]), sort_keys=True, indent=1, default=str)}")
+    return "\n\n".join(parts) if parts else "(no inputs)"
+
+
 def llm_realization(
     provider: ToolAwareProvider,
     handle: str,
@@ -42,6 +61,8 @@ def llm_realization(
 
     async def cook(inputs: Dict[str, Any], params: Dict[str, Any]) -> Any:
         messages: List[Dict[str, Any]] = list(inputs.get("messages") or [])
+        if not messages:
+            messages = [{"role": "user", "content": render_inputs(inputs)}]
         system: Optional[str] = params.get("system")
         if system:
             messages = [{"role": "system", "content": system}, *messages]
@@ -66,4 +87,4 @@ def llm_realization(
     return Realization(handle=handle, cook=cook, deterministic=deterministic)
 
 
-__all__ = ["llm_realization"]
+__all__ = ["llm_realization", "render_inputs"]

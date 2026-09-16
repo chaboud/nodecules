@@ -68,3 +68,28 @@ def test_strips_as_nodes_are_copy_on_write():
     assert strip_read(store, m1, "strips/log") == [1, 2]
     assert strip_read(store, m2, "strips/log") == [1, 2, 3]
     assert strip_read(store, store.current(LIB), "strips/log") == []
+
+
+@pytest.mark.asyncio
+async def test_a_node_without_messages_is_put_to_the_model_as_its_inputs_rendered_by_role():
+    """A deferred `consider/...` step has a decision, not a chat, in front of
+    the model. The realization renders every input by role as one user
+    message, so the same wrapper serves both shapes."""
+    from nodecules.core.llm_realization import render_inputs
+
+    provider = MockToolProvider(responses=["Take the cheap one."])
+    store = Store()
+    tx = store.transaction(LIB, author="dev")
+    tx.put(Node(id="recipes/consider", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "llm.mock@1", "params": {"system": "Advise.", "model": "mock-1"}}))
+    tx.commit()
+    tx = store.transaction(CHAT, author="dev")
+    tx.put(Node(id="facts", kind="facts", scope=CHAT, data={"b": 2, "a": [1, 2]}))
+    tx.put(Node(id="consider", kind="llm.consideration", scope=CHAT, edges=(Edge(target="facts", role="facts"), Edge(target="recipes/consider", scope=LIB, role=RECIPE_ROLE))))
+    tx.commit()
+    out = await Generator(store, [llm_realization(provider, "llm.mock@1")]).produce(CHAT, "consider")
+    assert out.cooked and out.node.data["content"] == "Take the cheap one."
+    sent = provider.call_log[-1]["messages"]
+    assert sent[0] == {"role": "system", "content": "Advise."}
+    assert sent[1]["role"] == "user" and sent[1]["content"] == render_inputs({"facts": {"b": 2, "a": [1, 2]}})
+    assert sent[1]["content"].startswith("## facts\n") and '"a": [' in sent[1]["content"]
+    assert render_inputs({"messages": []}) == "(no inputs)"

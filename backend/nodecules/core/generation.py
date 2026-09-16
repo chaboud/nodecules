@@ -72,7 +72,7 @@ RECIPE_ROLE = "recipe"
 PARAMS_ROLE = "params"
 RECIPE_TEMPLATE_KIND = "recipe.template"
 
-Outcome = Literal["exact", "via-substitute", "equivalent", "lost"]
+Outcome = Literal["exact", "via-substitute", "equivalent", "lost", "failed"]
 Reproducibility = Literal["exact", "equivalent"]
 
 CookFn = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[Any]]
@@ -88,6 +88,38 @@ class Realization:
     handle: str
     cook: CookFn
     deterministic: bool = False
+
+
+class Routed:
+    """What a routing realization returns: the chosen alternative's data,
+    which role it chose, and which role was the primary. The generator
+    unwraps it, records the route in the receipt, and marks the outcome
+    `via-substitute` when the choice was not the primary (REFERENCE-MODEL
+    §18: routing is graph structure, and a substitution is visible)."""
+
+    __slots__ = ("data", "chose", "primary")
+
+    def __init__(self, data: Any, *, chose: str, primary: str) -> None:
+        self.data = data
+        self.chose = chose
+        self.primary = primary
+
+
+def router_realization(handle: str = "router.first-available@1") -> Realization:
+    """A router: its inputs are alternatives (usually optional edges); params
+    `prefer` lists roles in order, first is the primary. Picks the first
+    alternative that is present. With none present it fails ordinarily."""
+
+    async def cook(inputs: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        order = list(params.get("prefer") or sorted(inputs))
+        if not order:
+            raise RuntimeError("router has no alternatives")
+        for role in order:
+            if role in inputs and inputs[role] is not None:
+                return Routed(inputs[role], chose=role, primary=order[0])
+        raise RuntimeError(f"no alternative available among {order}")
+
+    return Realization(handle=handle, cook=cook, deterministic=True)
 
 
 class NoRealization(Exception):
@@ -128,6 +160,10 @@ class Generation(BaseModel):
     declared_realization: Optional[str] = None
     inputs: Tuple[ResolvedInput, ...] = ()
     lost: Tuple[str, ...] = ()
+    omitted: Tuple[str, ...] = ()  # optional inputs that were not available
+    route: Optional[Dict[str, str]] = None  # {"chose": role, "primary": role} when a router ran
+    attempts: int = 0
+    error: Optional[str] = None
     note: str = ""
 
 
@@ -178,7 +214,9 @@ class Generator:
         bindings: Optional[Mapping[str, str]] = None,
         author: str = "generator",
         plan_hash: Optional[str] = None,
+        tracker: Any = None,
     ) -> None:
+        self.tracker = tracker  # core/tracking.py's Tracker, or anything with .record(kind, scope, node, **detail)
         self.store = store
         if isinstance(realizations, Mapping):
             self.realizations: Dict[str, Realization] = dict(realizations)
@@ -197,16 +235,12 @@ class Generator:
         that could not be recovered."""
         order = self._order(scope, node_id)
         result: Optional[Generation] = None
+        problems: Dict[str, Generation] = {}  # ref -> the lost or failed generation, so consumers carry the root cause
         for sc, nid in order:
-            result = await self._produce_one(sc, nid)
-            if result.outcome == "lost" and (sc, nid) != (scope, node_id):
-                return Generation(
-                    scope=scope,
-                    node_id=node_id,
-                    outcome="lost",
-                    lost=result.lost,
-                    note=f"{sc}:{nid} could not be produced",
-                )
+            result = await self._produce_one(sc, nid, problems)
+            self._track(result)
+            if result.outcome in ("failed", "lost"):
+                problems[f"{sc}:{nid}"] = result
         assert result is not None
         return result
 
@@ -230,6 +264,25 @@ class Generator:
             out[a.node_id] = await sub.produce(scope, a.node_id)
         self.cooks += sub.cooks
         return out
+
+    def _track(self, g: Generation) -> None:
+        if self.tracker is None:
+            return
+        how = "cache-hit" if g.cache_hit else ("cooked" if g.cooked else g.outcome)
+        self.tracker.record(
+            f"produce.{how}",
+            g.scope,
+            g.node_id,
+            outcome=g.outcome,
+            reproducibility=g.reproducibility,
+            realization=g.realization,
+            cache_key=g.cache_key,
+            route=g.route,
+            omitted=list(g.omitted),
+            lost=list(g.lost),
+            attempts=g.attempts,
+            error=g.error,
+        )
 
     # -- ordering --------------------------------------------------------------------
 
@@ -269,7 +322,8 @@ class Generator:
 
     # -- one node --------------------------------------------------------------------
 
-    async def _produce_one(self, scope: str, node_id: str) -> Generation:
+    async def _produce_one(self, scope: str, node_id: str, problems: Optional[Dict[str, Generation]] = None) -> Generation:
+        problems = problems or {}
         manifest = self.store.current(scope)
         cur = self.store.get(manifest, node_id)
         if cur is None:
@@ -306,13 +360,23 @@ class Generator:
         inputs: Dict[str, Any] = {}
         resolved: List[ResolvedInput] = []
         lost: List[str] = []
+        omitted: List[str] = []
         for e in cur.edges:
             if e.role in (RECIPE_ROLE, PARAMS_ROLE):
                 continue
             tgt = self._read(scope, e)
             ref = f"{e.scope or scope}:{e.target}"
-            if not isinstance(tgt, Node) or tgt.data is None:
-                lost.append(ref)
+            upstream = problems.get(ref)
+            if upstream is not None or not isinstance(tgt, Node) or tgt.data is None:
+                # unavailable now, or produced just now and failed/lost: a stale body does not count
+                if e.optional:
+                    omitted.append(ref)
+                elif upstream is not None and upstream.outcome == "failed":
+                    return Generation(scope=scope, node_id=node_id, outcome="failed", error=f"input {ref} failed: {upstream.error}", inputs=tuple(resolved))
+                elif upstream is not None:
+                    lost.extend(upstream.lost or (ref,))  # carry the root cause, not the neighbour
+                else:
+                    lost.append(ref)
                 continue
             inputs[e.role or e.target] = select(e.pattern, tgt.data, window)
             resolved.append(
@@ -325,7 +389,7 @@ class Generator:
                 )
             )
         if lost:
-            return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(lost), inputs=tuple(resolved))
+            return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(dict.fromkeys(lost)), inputs=tuple(resolved))
 
         cache_key = canonical_hash(
             {
@@ -355,8 +419,31 @@ class Generator:
                 inputs=tuple(resolved),
             )
 
-        data = await realization.cook(inputs, params)
-        self.cooks += 1
+        attempts = 0
+        max_attempts = 1 + int(params.get("retry", 0) or 0)
+        route: Optional[Dict[str, str]] = None
+        while True:
+            attempts += 1
+            try:
+                data = await realization.cook(inputs, params)
+                self.cooks += 1
+                break
+            except Exception as exc:  # a realization failed: a state, not a crash
+                if attempts >= max_attempts:
+                    return Generation(
+                        scope=scope,
+                        node_id=node_id,
+                        outcome="failed",
+                        realization=used,
+                        declared_realization=declared,
+                        inputs=tuple(resolved),
+                        omitted=tuple(omitted),
+                        attempts=attempts,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+        if isinstance(data, Routed):
+            route = {"chose": data.chose, "primary": data.primary}
+            data = data.data
         produced = Node(id=node_id, kind=cur.kind, scope=scope, data=data, edges=cur.edges)
         new_hash = produced.content_hash()
 
@@ -371,9 +458,15 @@ class Generator:
         else:
             measured = False
             reproducibility = "exact" if realization.deterministic else "equivalent"
-        outcome: Outcome = "via-substitute" if used != declared else "exact"
+        outcome: Outcome = "via-substitute" if (used != declared or (route is not None and route["chose"] != route["primary"])) else "exact"
 
         recipe_record: Dict[str, Any] = {"realization": used, "declared": declared, "params": params}
+        if route is not None:
+            recipe_record["route"] = route
+        if omitted:
+            recipe_record["omitted"] = list(omitted)
+        if attempts > 1:
+            recipe_record["attempts"] = attempts
         if self.plan_hash is not None:
             recipe_record["plan"] = self.plan_hash
             executor = getattr(self, "_executors", {}).get(node_id)
@@ -408,6 +501,9 @@ class Generator:
             realization=used,
             declared_realization=declared,
             inputs=tuple(resolved),
+            omitted=tuple(omitted),
+            route=route,
+            attempts=attempts,
         )
 
     def _read(self, from_scope: str, edge: Edge):
@@ -424,6 +520,8 @@ __all__ = [
     "RECIPE_TEMPLATE_KIND",
     "Realization",
     "ResolvedInput",
+    "Routed",
+    "router_realization",
     "declaration_hash",
     "select",
 ]

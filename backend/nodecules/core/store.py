@@ -135,6 +135,7 @@ class Edge(BaseModel):
     scope: Optional[str] = None
     pattern: AccessPattern = Field(default_factory=AllPattern)
     role: str = ""
+    optional: bool = False  # a missing or lost target is recorded, not fatal (routers and fallbacks)
 
 
 class Node(BaseModel):
@@ -445,6 +446,11 @@ class Store:
         self._manifests: Dict[str, Manifest] = {}
         self._lock = threading.Lock()
         self._backing: Optional[Backing] = None
+        self.listeners: List[Callable[[str, Manifest], None]] = []  # (event, manifest); see core/tracking.py
+
+    def _notify(self, event: str, manifest: Manifest) -> None:
+        for fn in list(self.listeners):
+            fn(event, manifest)
 
     # -- durability ------------------------------------------------------------------
 
@@ -562,6 +568,7 @@ class Store:
             if self._backing is not None:
                 self._backing.set_head(scope, manifest.content_hash())
             self._current[scope] = manifest
+        self._notify("head", manifest)
 
     def history(self, scope: str) -> Iterator[Manifest]:
         """Walk the parent chain from the current manifest to genesis."""
@@ -801,7 +808,8 @@ class Store:
                 self._backing.put_manifest(manifest)
                 self._backing.set_head(tx.scope, manifest.content_hash())
             self._current[tx.scope] = manifest
-            return manifest
+        self._notify("commit", manifest)
+        return manifest
 
     def _fold(
         self,

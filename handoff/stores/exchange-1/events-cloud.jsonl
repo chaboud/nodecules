@@ -10,3 +10,9 @@
 {"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "strips/messages", "scope": "chat/spark", "seq": 9}
 {"at": null, "detail": {"activated": null, "author": "cloud", "manifest": "3b30e0ab5171be9a73843b62596fa96ab9d33559bb93db080516fa91167cb2b3", "merge_parent": null, "note": "request reply", "parent": "bd7b5c30a3e3c7bd915dedd7a72076282468c8aa7c3a60d89877a8206226cf71", "seq": 3}, "kind": "commit", "node": null, "scope": "chat/spark", "seq": 10}
 {"at": null, "detail": {"cache_key": "07aa86c647d13ef01c2872f43e6a5de78bb538c6680ed211e5555509fd15ffc9", "outcome": "pending", "realization": "llm.spark@1"}, "kind": "produce.pending", "node": "reply", "scope": "chat/spark", "seq": 11}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/consider", "scope": "lib", "seq": 0}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "decisions/dest", "scope": "trip/plan", "seq": 1}
+{"at": null, "detail": {"cache_key": "a9beb79af0c5bc67dedfd67b1e3c1e8d9cd585c4675953f6ec56b6d7d5eabdfe", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cache-hit", "node": "consider/dest", "scope": "trip/plan", "seq": 2}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/reply", "scope": "lib", "seq": 3}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "strips/messages", "scope": "chat/spark", "seq": 4}
+{"at": null, "detail": {"cache_key": "07aa86c647d13ef01c2872f43e6a5de78bb538c6680ed211e5555509fd15ffc9", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cache-hit", "node": "reply", "scope": "chat/spark", "seq": 5}

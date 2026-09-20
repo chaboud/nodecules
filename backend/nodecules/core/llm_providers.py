@@ -97,6 +97,11 @@ class ToolCallResponse:
     tool_calls: List[ToolCall] = field(default_factory=list)
     stop_reason: StopReason = "end_turn"
     raw: Optional[Any] = None
+    # A thinking model's reasoning text, when the engine returns it apart
+    # from the answer (OpenAI-compatible `reasoning_content`). Empty for
+    # every other model. Kept so an empty answer can say where the budget
+    # went (found on the Spark, 2026-09-19).
+    reasoning: str = ""
 
 
 class ToolAwareProvider(ABC):

@@ -207,5 +207,9 @@ postgres_data/
 # identity-bench scratch
 spikes/identity-bench/_*.wasm
 
-# store heads live under handoff/stores/*/heads/<scope>/ and a scope may be named "lib" (spark, 2026-09-19)
-!handoff/stores/**/heads/lib/
+# A store directory under handoff/stores/ is content-addressed and must be
+# carried whole: heads/<scope>/ takes its name from the scope, and the
+# Python-build rules above swallow scopes named lib, build, dist, env, var,
+# tmp, logs (found on the Spark, 2026-09-19: the lib head never arrived and
+# produce raised DanglingEdge). Nothing in this tree is ever a build product.
+!handoff/stores/**

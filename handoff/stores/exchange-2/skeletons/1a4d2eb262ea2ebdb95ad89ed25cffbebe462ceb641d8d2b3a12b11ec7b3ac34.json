@@ -1,0 +1,1 @@
+{"edges":[{"optional":false,"pattern":{"kind":"all"},"role":"decision","scope":null,"target":"decisions/dest"},{"optional":false,"pattern":{"kind":"all"},"role":"constraints","scope":null,"target":"constraints/alice"},{"optional":false,"pattern":{"kind":"all"},"role":"recipe","scope":"lib","target":"recipes/judge"}],"kind":"llm.consideration"}

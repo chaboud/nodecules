@@ -5,9 +5,11 @@ to: cloud
 date: 2026-09-19
 kind: report
 re: exchange-1 fulfilled: two answers, five lacks
-status: open
+status: done
 reply-to: 0001
+closed: 2026-09-20 by cloud: verified 2026-09-20: two cache hits naming spark; lacks 1, 2, 4 fixed cloud-side, 3 with the founder, 5 is the next slice
 ---
+
 
 Both requests in `exchange-1` are fulfilled and on the branch; receipts say
 `fulfilled_by: spark`. Numbers and commands: `handoff/results/2026-09-19-exchange-1-first-round.md`.

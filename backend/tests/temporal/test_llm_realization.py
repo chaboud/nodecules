@@ -93,3 +93,40 @@ async def test_a_node_without_messages_is_put_to_the_model_as_its_inputs_rendere
     assert sent[1]["role"] == "user" and sent[1]["content"] == render_inputs({"facts": {"b": 2, "a": [1, 2]}})
     assert sent[1]["content"].startswith("## facts\n") and '"a": [' in sent[1]["content"]
     assert render_inputs({"messages": []}) == "(no inputs)"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_answer_is_a_failed_production_that_says_where_the_tokens_went():
+    """Found on the Spark, 2026-09-19: a thinking model spent the recipe's
+    max_tokens on reasoning and returned content "" with finish length,
+    and the worker filed that as fulfilled. Now the realization refuses:
+    the production fails with an error naming the reasoning length, and
+    nothing is stored to become a cache hit."""
+    from typing import Any, Dict, List, Optional
+
+    from nodecules.core.llm_providers import ToolAwareProvider, ToolCallResponse, ToolSchema
+
+    class Thinker(ToolAwareProvider):
+        async def generate_with_tools(self, messages: List[Dict[str, Any]], *, tools: Optional[List[ToolSchema]] = None, response_schema: Optional[Dict[str, Any]] = None, model: str, temperature: float = 0.2, max_tokens: int = 4_096) -> ToolCallResponse:
+            return ToolCallResponse(content="", tool_calls=[], stop_reason="max_tokens", raw={}, reasoning="let me think " * 40)
+
+        @property
+        def supports_tool_use(self) -> bool:
+            return False
+
+        @property
+        def supports_response_schema(self) -> bool:
+            return False
+
+    store = Store()
+    tx = store.transaction(LIB, author="dev")
+    tx.put(Node(id="recipes/assistant", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "llm.think@1", "params": {"model": "t", "max_tokens": 600}}))
+    tx.commit()
+    tx = store.transaction(CHAT, author="dev")
+    tx.put(Node(id="reply", kind="chat.reply", scope=CHAT, edges=(Edge(target="strips/messages", pattern=AllPattern(), role="messages"), Edge(target="recipes/assistant", scope=LIB, role=RECIPE_ROLE))))
+    tx.commit()
+    strip_append(store, CHAT, "strips/messages", {"role": "user", "content": "hi"}, author="alice")
+    out = await Generator(store, [llm_realization(Thinker(), "llm.think@1")]).produce(CHAT, "reply")
+    assert out.outcome == "failed" and not out.cooked
+    assert out.error.startswith("EmptyAnswer:") and "reasoning=520 chars" in out.error and "max_tokens=600" in out.error and "switch thinking off" in out.error
+    assert store.get(store.current(CHAT), envelope_id("reply")) is None  # nothing stored, nothing to hit

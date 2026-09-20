@@ -88,3 +88,25 @@ def test_notes_round_trip(tmp_path: Path):
     assert "0001" not in run(note, "--root", str(root), "list").stdout
     assert "0001  done" in run(note, "--root", str(root), "list", "--all").stdout
     assert run(note, "--root", str(root), "show", "0001").stdout.startswith("---\nid: 0001")
+
+
+def test_the_second_exchange_asks_for_a_tool_call_and_a_judgement(tmp_path: Path):
+    """exchange-2 exists because the first round could not exercise tool-call
+    parsing or a consideration with facts to judge. With the stand-in
+    model neither check can pass, and --verify says so without failing:
+    both steps are cache hits, and the checks report what came back."""
+    store = tmp_path / "exchange-2"
+    seeded = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store))
+    assert seeded.returncode == 0, seeded.stderr
+    assert "2 pending request(s)" in seeded.stdout and "requests/judge/dest" in seeded.stdout and "'trip/plan:constraints/alice'" in seeded.stdout
+    done = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark")
+    assert done.returncode == 0, done.stderr
+    assert "2 request(s) fulfilled" in done.stdout
+    verified = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store), "--verify")
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    assert "both steps are cache hits" in verified.stdout
+    assert "no tool call (stop_reason=end_turn)" in verified.stdout and "not JSON:" in verified.stdout
+    reloaded = load(store)
+    assert all(requests(reloaded, s) == [] for s in reloaded.scopes())
+    sent = reloaded.get(reloaded.current("trip/plan"), "judge/dest").data["content"]
+    assert "## constraints" in sent and "## decision" in sent  # the echo repeats what the model was shown: both roles rendered

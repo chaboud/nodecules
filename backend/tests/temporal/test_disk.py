@@ -171,3 +171,41 @@ def test_a_store_directory_merged_by_git_attaches_to_one_head(tmp_path: Path):
     assert DiskBacking(tmp_path / "merged").heads()[M] == [head.content_hash()]  # retired both candidates
     # both machines loading the merged directory agree
     assert load(tmp_path / "merged").current(M).content_hash() == head.content_hash()
+
+
+def test_a_scope_whose_head_files_went_missing_is_recovered_from_its_manifests_out_loud(tmp_path):
+    """Found on the Spark, 2026-09-19: the repo's gitignore swallowed
+    heads/lib/, so the lib manifest arrived without its head and the first
+    symptom was a DanglingEdge two layers up. Now the missing head is
+    recovered from the manifest DAG (its leaves), written back, and said
+    with a warning naming the scope."""
+    import shutil
+    import warnings as _w
+
+    root = tmp_path / "store"
+    store = Store()
+    store.attach(DiskBacking(root))
+    tx = store.transaction("lib", author="dev")
+    tx.put(Node(id="recipes/a", kind="recipe", scope="lib", data={"v": 1}))
+    tx.commit("first")
+    tx = store.transaction("lib", author="dev")
+    tx.put(Node(id="recipes/a", kind="recipe", scope="lib", data={"v": 2}))
+    latest = tx.commit("second")
+    tx = store.transaction("app", author="dev")
+    tx.put(Node(id="x", kind="k", scope="app", data=1))
+    tx.commit("app")
+    shutil.rmtree(root / "heads" / "lib")  # what a gitignored directory looks like on the other machine
+
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        reloaded = load(root)
+    msgs = [str(c.message) for c in caught if issubclass(c.category, RuntimeWarning)]
+    assert len(msgs) == 1 and "'lib'" in msgs[0] and "2 manifest(s)" in msgs[0] and "recovered 1 head(s)" in msgs[0]
+    assert reloaded.current("lib").content_hash() == latest.content_hash()
+    assert reloaded.get(reloaded.current("lib"), "recipes/a").data == {"v": 2}
+    assert (root / "heads" / "lib" / latest.content_hash()).exists()  # written back
+    assert set(reloaded.scopes()) == {"lib", "app"}
+    with _w.catch_warnings(record=True) as again:
+        _w.simplefilter("always")
+        load(root)
+    assert not [c for c in again if issubclass(c.category, RuntimeWarning)]  # healed, so quiet

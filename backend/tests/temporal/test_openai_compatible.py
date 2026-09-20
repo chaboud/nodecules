@@ -20,7 +20,10 @@ class Fake(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(n))
         SEEN.append((self.path, dict(self.headers), body))
-        if body.get("tools"):
+        if body["messages"][-1]["content"] == "think":
+            # a thinking model that spent the budget before answering (the Spark, 2026-09-19)
+            reply = {"choices": [{"message": {"role": "assistant", "content": "", "reasoning_content": "hmm " * 10}, "finish_reason": "length"}]}
+        elif body.get("tools"):
             reply = {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": json.dumps({"q": "kyoto"})}}]}, "finish_reason": "tool_calls"}]}
         else:
             reply = {"choices": [{"message": {"role": "assistant", "content": f"echo:{body['messages'][-1]['content']}"}, "finish_reason": "stop"}], "usage": {"total_tokens": 7}}
@@ -75,3 +78,11 @@ async def test_extra_body_rides_every_request(server):
     plain = OpenAICompatibleProvider(server)
     await plain.generate_with_tools([{"role": "user", "content": "hi"}], model="m")
     assert "chat_template_kwargs" not in SEEN[-1][2]
+
+
+@pytest.mark.asyncio
+async def test_a_thinking_models_reasoning_is_kept_apart_so_an_empty_answer_can_say_where_the_budget_went(server):
+    p = OpenAICompatibleProvider(server)
+    r = await p.generate_with_tools([{"role": "user", "content": "think"}], model="m", max_tokens=40)
+    assert r.content == "" and r.tool_calls == [] and r.stop_reason == "max_tokens"
+    assert r.reasoning == "hmm " * 10

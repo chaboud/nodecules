@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 from urllib.parse import quote, unquote
@@ -195,7 +196,41 @@ class DiskBacking(Backing):
                 names = sorted(p.name for p in d.iterdir() if p.is_file())
                 if names:
                     out[unquote(d.name)] = names
+        self._recover_missing_heads(out)
         return out
+
+    def _recover_missing_heads(self, out: Dict[str, List[str]]) -> None:
+        """A scope whose manifests are here but whose head files are not is
+        recovered from the manifest DAG: its leaves are its candidate heads,
+        written back under heads/. Said out loud with a warning, because
+        the directory arrived wrong and will keep arriving wrong until the
+        cause is fixed. Found on the Spark, 2026-09-19: the repo's gitignore
+        swallowed heads/lib/, the lib manifest arrived without its head, and
+        the first symptom was `DanglingEdge: lib:recipes/reply is not bound`
+        two layers up."""
+        by_scope: Dict[str, Dict[str, dict]] = {}
+        for p in (self.root / "manifests").glob("*.json"):
+            raw = _read(p)
+            if raw is not None:
+                by_scope.setdefault(raw.get("scope", ""), {})[p.stem] = raw
+        for scope, raws in sorted(by_scope.items()):
+            if scope in out:
+                continue
+            parents = {r.get("parent") for r in raws.values()} | {r.get("merge_parent") for r in raws.values()}
+            leaves = sorted(h for h in raws if h not in parents)
+            if not leaves:
+                continue
+            warnings.warn(
+                f"store at {self.root}: scope {scope!r} has {len(raws)} manifest(s) and no head file under heads/; "
+                f"recovered {len(leaves)} head(s) from the manifest DAG and wrote them back (is heads/{quote(scope, safe='')}/ gitignored?)",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            d = self._head_dir(scope)
+            d.mkdir(parents=True, exist_ok=True)
+            for h in leaves:
+                (d / h).write_text("")
+            out[scope] = leaves
 
 
 def load(path: str | Path) -> Store:

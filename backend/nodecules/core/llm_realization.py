@@ -38,6 +38,13 @@ def _plain(obj: Any) -> Any:
     return obj
 
 
+class EmptyAnswer(Exception):
+    """The model returned no content and no tool calls. A production that
+    stored that would be a cache hit forever, so it fails instead: the
+    generator records the error as a state, the request (if any) stays
+    pending, and the message says where the tokens went."""
+
+
 def render_inputs(inputs: Dict[str, Any]) -> str:
     """Inputs by role as one user message: a heading per role and the
     data as JSON. Deterministic (sorted keys) so the same inputs render
@@ -77,6 +84,14 @@ def llm_realization(
             temperature=float(params.get("temperature", 0.2)),
             max_tokens=int(params.get("max_tokens", 4_096)),
         )
+        if not response.content and not response.tool_calls:
+            reasoning = len(getattr(response, "reasoning", "") or "")
+            hint = (
+                "a thinking model spent the budget on reasoning: switch thinking off through the provider (extra_body) or raise max_tokens"
+                if reasoning
+                else ("the answer was cut off before any content: raise max_tokens" if response.stop_reason == "max_tokens" else "the engine returned nothing")
+            )
+            raise EmptyAnswer(f"no content and no tool calls (stop_reason={response.stop_reason}, reasoning={reasoning} chars, max_tokens={int(params.get('max_tokens', 4_096))}); {hint}")
         return {
             "content": response.content,
             "tool_calls": [_plain(tc) for tc in response.tool_calls],
@@ -87,4 +102,4 @@ def llm_realization(
     return Realization(handle=handle, cook=cook, deterministic=deterministic)
 
 
-__all__ = ["llm_realization", "render_inputs"]
+__all__ = ["EmptyAnswer", "llm_realization", "render_inputs"]

@@ -87,7 +87,8 @@ class OpenAICompatibleProvider(ToolAwareProvider):
             calls.append(ToolCall(call_id=tc.get("id") or "", name=fn.get("name") or "", arguments=args or {}))
         finish = choice.get("finish_reason") or "stop"
         stop: StopReason = "tool_use" if calls else ("max_tokens" if finish == "length" else "end_turn")
-        return ToolCallResponse(content=msg.get("content") or "", tool_calls=calls, stop_reason=stop, raw=raw)
+        reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+        return ToolCallResponse(content=msg.get("content") or "", tool_calls=calls, stop_reason=stop, raw=raw, reasoning=reasoning if isinstance(reasoning, str) else str(reasoning))
 
     @property
     def supports_tool_use(self) -> bool:

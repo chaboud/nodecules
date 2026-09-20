@@ -23,8 +23,9 @@ a request node another machine fulfils through the same store. That last
 mechanism is how you and I will work: the store directory is the wire,
 git carries it.
 
-The honest state: 482 tests, all in one process, pydantic and pytest
-only. Four demos and an inspector run on it. No real model has ever
+The honest state: 482 tests, all in one process, on pydantic, pytest,
+and pytest-asyncio only (`pip install pydantic pytest pytest-asyncio`;
+the first venv on the Spark lacked the third and saw 78 failures). Four demos and an inspector run on it. No real model has ever
 answered through it. The only provider behind the tool-aware interface
 that has been exercised is a mock, and the OpenAI-compatible adapter
 (`backend/nodecules/core/openai_compatible.py`) has only met a fake
@@ -53,6 +54,7 @@ About an hour. Skim nothing in the first three.
 Run the suite before anything else, from `backend/`:
 
 ```bash
+pip install pydantic pytest pytest-asyncio
 python3 -m pytest tests/temporal/ -q     # expect 482 passed in a few seconds
 ```
 

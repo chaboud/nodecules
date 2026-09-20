@@ -21,11 +21,27 @@ from .llm_providers import StopReason, ToolAwareProvider, ToolCall, ToolCallResp
 
 
 class OpenAICompatibleProvider(ToolAwareProvider):
-    def __init__(self, base_url: str, *, api_key: str = "", timeout_s: float = 120.0, extra_headers: Optional[Dict[str, str]] = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        api_key: str = "",
+        timeout_s: float = 120.0,
+        extra_headers: Optional[Dict[str, str]] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout_s = timeout_s
         self.extra_headers = dict(extra_headers or {})
+        # Engine-specific request fields merged into every payload, e.g.
+        # llama.cpp's {"chat_template_kwargs": {"enable_thinking": false}}.
+        # Found on the Spark, 2026-09-19: a thinking model (Qwen3.8-27B) spent
+        # the recipe's whole max_tokens on `reasoning_content` and returned
+        # content "" with finish "length" — the first two answers were empty.
+        # The graph never sees this; it is operator configuration, like the
+        # endpoint itself.
+        self.extra_body = dict(extra_body or {})
         self.last_raw: Optional[Dict[str, Any]] = None
 
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -50,6 +66,7 @@ class OpenAICompatibleProvider(ToolAwareProvider):
         max_tokens: int = 4_096,
     ) -> ToolCallResponse:
         payload: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        payload.update(self.extra_body)
         if tools:
             payload["tools"] = [{"type": "function", "function": {"name": t.name, "description": getattr(t, "description", ""), "parameters": getattr(t, "parameters", {}) or {}}} for t in tools]
         if response_schema:

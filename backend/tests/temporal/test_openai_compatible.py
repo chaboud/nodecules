@@ -57,3 +57,21 @@ async def test_plain_chat_and_tool_calls_round_trip(server):
     assert r.stop_reason == "tool_use" and r.tool_calls[0].name == "lookup" and r.tool_calls[0].arguments == {"q": "kyoto"}
     assert SEEN[-1][2]["tools"][0]["function"]["name"] == "lookup"
     assert p.last_raw["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_extra_body_rides_every_request(server):
+    """Engine-specific fields (llama.cpp's chat_template_kwargs to switch a
+    thinking model's reasoning off) are operator configuration merged into
+    every payload; the graph never sees them. Found on the Spark: a thinking
+    model returned content "" with finish "length" without it."""
+    SEEN.clear()
+    p = OpenAICompatibleProvider(server, extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+    r = await p.generate_with_tools([{"role": "user", "content": "hi"}], model="m")
+    assert r.content == "echo:hi"
+    body = SEEN[-1][2]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert body["model"] == "m" and "messages" in body
+    plain = OpenAICompatibleProvider(server)
+    await plain.generate_with_tools([{"role": "user", "content": "hi"}], model="m")
+    assert "chat_template_kwargs" not in SEEN[-1][2]

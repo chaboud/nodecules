@@ -1,0 +1,8 @@
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/reply", "scope": "lib", "seq": 0}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "strips/messages", "scope": "chat/spark", "seq": 1}
+{"at": null, "detail": {"activated": null, "author": "spark", "manifest": "6854055ccdda84ac77b3a85f299c47e83a82426045ce87b3570b1f04a61af4e8", "merge_parent": null, "note": "fulfil reply (spark)", "parent": "3b30e0ab5171be9a73843b62596fa96ab9d33559bb93db080516fa91167cb2b3", "seq": 4}, "kind": "commit", "node": null, "scope": "chat/spark", "seq": 2}
+{"at": null, "detail": {"cache_key": "07aa86c647d13ef01c2872f43e6a5de78bb538c6680ed211e5555509fd15ffc9", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cooked", "node": "reply", "scope": "chat/spark", "seq": 3}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/consider", "scope": "lib", "seq": 4}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "decisions/dest", "scope": "trip/plan", "seq": 5}
+{"at": null, "detail": {"activated": null, "author": "spark", "manifest": "b0f451ff2e7a5f7aca997b3d2f0444fa0f510e247e46a1030bd6644978c7b8f0", "merge_parent": null, "note": "fulfil consider/dest (spark)", "parent": "fad273e373789dff0293f3becc22d1a8443b02a7b28c1a943f040b97797916e4", "seq": 3}, "kind": "commit", "node": null, "scope": "trip/plan", "seq": 6}
+{"at": null, "detail": {"cache_key": "a9beb79af0c5bc67dedfd67b1e3c1e8d9cd585c4675953f6ec56b6d7d5eabdfe", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cooked", "node": "consider/dest", "scope": "trip/plan", "seq": 7}

@@ -5,8 +5,10 @@ to: spark
 date: 2026-09-18
 kind: ask
 re: First round: fulfil exchange-1 with a real model
-status: open
+status: done
+closed: 2026-09-19 by spark: two fulfilled with Qwen3.8-27B on the Spark, 41.2 s round (11.3 s + 29.8 s); lib head was gitignored; thinking had to be switched off
 ---
+
 
 Welcome. Read `handoff/SPARK.md` first; it is the letter. This note is the
 first concrete ask.

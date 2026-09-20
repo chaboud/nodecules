@@ -31,6 +31,7 @@ one file per writer, so two machines never append to the same file.
 from __future__ import annotations
 
 import argparse
+import json
 import asyncio
 import importlib
 import os
@@ -65,7 +66,8 @@ def make_provider(a: argparse.Namespace) -> ToolAwareProvider:
         key = a.api_key or ""
         if key.startswith("env:"):
             key = os.environ.get(key[4:], "")
-        return OpenAICompatibleProvider(a.base_url, api_key=key, timeout_s=a.timeout)
+        extra = json.loads(a.extra_body) if a.extra_body else None
+        return OpenAICompatibleProvider(a.base_url, api_key=key, timeout_s=a.timeout, extra_body=extra)
     if ":" in a.provider:
         mod, fn = a.provider.split(":", 1)
         return getattr(importlib.import_module(mod), fn)()
@@ -176,6 +178,8 @@ if __name__ == "__main__":
     ap.add_argument("--api-key", help="a key, or env:NAME")
     ap.add_argument("--model", help="the served model name; overrides the recipe's")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--extra-body", default="", metavar="JSON",
+                    help='engine-specific request fields merged into every call, e.g. \'{"chat_template_kwargs": {"enable_thinking": false}}\' for a thinking model on llama.cpp')
     ap.add_argument("--handle", action="append", default=None, help="realization handle(s) this machine offers (default: llm.spark@1)")
     ap.add_argument("--by", required=True, help="who is fulfilling: goes on every manifest and receipt")
     ap.add_argument("--dry-run", action="store_true")

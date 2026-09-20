@@ -206,3 +206,6 @@ local_settings.py
 postgres_data/
 # identity-bench scratch
 spikes/identity-bench/_*.wasm
+
+# store heads live under handoff/stores/*/heads/<scope>/ and a scope may be named "lib" (spark, 2026-09-19)
+!handoff/stores/**/heads/lib/

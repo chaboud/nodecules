@@ -36,6 +36,7 @@ handoff/
   SPARK.md             the letter to the Spark session
   note.py              new / list / show / done for notes
   fulfil.py            fulfil pending requests in a store with a real provider
+  spark-relay.sh       git relay for a Spark without a GitHub key, run on the keyed box (down | up)
   seed_exchange.py     the cloud side's seeding of an exchange store; --verify checks the round trip
   inbox/spark/         notes for the Spark, open until it closes them
   inbox/cloud/         notes for the cloud session
@@ -143,7 +144,12 @@ Nothing here runs on its own. Each side arranges its own cadence:
 - **Spark**: `fulfil.py --loop 300 --git` keeps a worker polling the
   exchange stores every five minutes, pulling first and pushing after.
   Or a schedule note's cadence via cron. It is the machine that stays up,
-  so it is the natural place for anything periodic.
+  so it is the natural place for anything periodic. **The Spark has no
+  GitHub key** (founder's choice), so `--git` cannot run there: the
+  keyed MacBook Air is its git side, and `spark-relay.sh` (the Spark's,
+  2026-09-21) carries the branch down to the Spark's checkout and its
+  commits back up to GitHub, never force-pushing to origin. Run it on
+  the keyed box; endpoints come from the environment.
 - **Cloud**: a daily Routine wakes the cloud session, which pulls, reads
   `inbox/cloud/`, acts, and pushes. Cloud sessions can also be poked by
   the founder at any time. The Routine's id and how to remove it are in

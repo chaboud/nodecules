@@ -5,8 +5,9 @@ Three parties work on this branch from different machines:
 | party | where | has | writes as |
 |---|---|---|---|
 | **cloud** | a container at claude.ai, fresh clone per session, no GPU, no model | the design queue, the vault, the spec | `cloud` |
-| **spark** | a DGX Spark, CUDA, a local inference engine, persistent disk | real models, real numbers, a machine that stays up | `spark` |
-| **laptop** | a MacBook Air | stenota's real weights (`stenota/HARDWARE-TODO.md`) | `laptop` |
+| **spark** | a Claude Code instance living on the DGX Spark (from 2026-09-29; the first spark party was keyhole's agent working from the Air, signed off in note 0004), CUDA, models on the Spark's loopback shared with keyhole, persistent disk, **no GitHub key** | real models, real numbers, a machine that stays up | `spark` |
+| **mbp** | a Claude Code instance on the MacBook Pro (from 2026-09-29), nodecules only, keyed for GitHub, on the same LAN as the Spark | the Spark's git side through `spark-relay.sh`; the second real machine for anything that needs two | `mbp` |
+| **laptop** | the MacBook Air | stenota's real weights (`stenota/HARDWARE-TODO.md`); keyhole's agent lives here and is hands-off nodecules | `laptop` |
 
 The founder reads everything and decides. `SPARK.md` is the letter to the
 Spark session; this file is the protocol both sessions follow.
@@ -33,7 +34,8 @@ Two channels ride on it:
 ```
 handoff/
   README.md            this protocol
-  SPARK.md             the letter to the Spark session
+  SPARK.md             the letter to the Spark session (with a 2026-09-29 preface for its second holder)
+  MBP.md               the letter to the MacBook Pro session
   note.py              new / list / show / done for notes
   fulfil.py            fulfil pending requests in a store with a real provider
   spark-relay.sh       git relay for a Spark without a GitHub key, run on the keyed box (down | up)
@@ -133,7 +135,9 @@ the cloud fulfils on its next turn.
 | `STATUS.md`, `REFERENCE-MODEL.md`, `WHY-WHAT-HOW.md`, `CLAUDE.md`, the vault | cloud | proposes edits in a note, with the exact text |
 | `backend/nodecules/core/*` | cloud, for the substrate's shape | Spark adds modules and fixes bugs it can reproduce, with tests, and says so in a report note; changes to an existing module's contract go through a note first |
 | `handoff/results/*`, `handoff/inbox/cloud/*`, `handoff/stores/*` (answers) | spark | reads |
-| `handoff/inbox/spark/*`, `handoff/stores/*` (requests) | cloud | reads |
+| `handoff/inbox/spark/*`, `handoff/inbox/mbp/*`, `handoff/stores/*` (requests) | cloud | reads |
+| `core/transport.py` and the replica wire (the MBP's slice, `MBP.md`) | mbp | proposes contract changes to `core/replica.py` by note first |
+| `handoff/inbox/cloud/*` | spark, mbp | reads |
 | `stenota/HARDWARE-TODO.md`, `stenota/results/` | laptop and Spark | cloud adds items |
 | `keyhole/*` | the keyhole agent | read only for everyone here |
 
@@ -146,10 +150,16 @@ Nothing here runs on its own. Each side arranges its own cadence:
   Or a schedule note's cadence via cron. It is the machine that stays up,
   so it is the natural place for anything periodic. **The Spark has no
   GitHub key** (founder's choice), so `--git` cannot run there: the
-  keyed MacBook Air is its git side, and `spark-relay.sh` (the Spark's,
-  2026-09-21) carries the branch down to the Spark's checkout and its
-  commits back up to GitHub, never force-pushing to origin. Run it on
-  the keyed box; endpoints come from the environment.
+  keyed box is its git side, and `spark-relay.sh` (2026-09-21) carries
+  the branch down to the Spark's checkout and its commits back up to
+  GitHub, never force-pushing to origin. Run it on the keyed box;
+  endpoints come from the environment. **From 2026-09-29 the keyed box
+  is the MacBook Pro** (`mbp`): it runs `down` at the start of its rounds
+  and `up` at the end, so the Spark's checkout is never more than one
+  mbp round stale. A deploy key on the Spark would retire the relay; that
+  is the founder's call.
+- **MBP**: also the natural home for anything that needs two real
+  machines on one LAN (the replica transport, `MBP.md`).
 - **Cloud**: a daily Routine wakes the cloud session, which pulls, reads
   `inbox/cloud/`, acts, and pushes. Cloud sessions can also be poked by
   the founder at any time. The Routine's id and how to remove it are in

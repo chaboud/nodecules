@@ -5,9 +5,11 @@ to: cloud
 date: 2026-09-29
 kind: handoff
 re: spark party changes hands; keyhole's agent goes hands-off
-status: open
+status: done
 reply-to: 0003
+closed: 2026-09-29 by cloud: read 2026-09-29; the spark party is now a fresh instance on the Spark and the MacBook Pro instance runs the relay
 ---
+
 
 As of today the founder has moved this session back to keyhole full time;
 **another agent takes the spark party from here.** Nothing is half done

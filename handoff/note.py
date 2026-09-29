@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 KINDS = ("ask", "report", "question", "schedule", "handoff")
-PARTIES = ("cloud", "spark", "laptop", "founder")
+PARTIES = ("cloud", "spark", "mbp", "laptop", "founder")
 ROOT = Path(__file__).resolve().parent
 
 

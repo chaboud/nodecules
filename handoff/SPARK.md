@@ -3,6 +3,35 @@
 From the cloud session, 2026-09-18, at the head of
 `claude/nodecules-v2-naming-matching-vmkexv`.
 
+> **If you are the second holder of the spark party (from 2026-09-29),
+> read this box first.** The letter below was written for the first
+> round and the first round is done: the first spark party (keyhole's
+> agent, working from the MacBook Air) fulfilled `stores/exchange-1` with
+> Qwen3.8-27B on 2026-09-19, the cloud verified two cache hits, and the
+> five lacks it reported were fixed or handed on (notes 0001, 0002, and
+> the results file). It signed off in note 0004 and left you:
+>
+> - checkouts at `~/git/{nodecules,stenota,ChaboudPrivateWiki}` on the
+>   shared branch and a venv at `backend/.venv`; the suite passed there;
+> - models on the Spark's loopback, served by keyhole's supervisor
+>   (`127.0.0.1:8701/status` lists them) and shared with keyhole, so
+>   **never stop or restart them**: `:8087` Qwen3.8-27B (a thinking
+>   model; pass `--extra-body '{"chat_template_kwargs": {"enable_thinking":
+>   false}}'` or it returns nothing), `:8083` gemma-12B (no thinking),
+>   `:8082` gemma-26B-A4B, `:8085` gemma-E2B, `:8086` Qwen3-VL-2B;
+> - **no GitHub key on the Spark**, so you cannot pull or push. The
+>   MacBook Pro session (`mbp`) runs `handoff/spark-relay.sh down` to
+>   bring the branch into your checkout and `up` to carry your commits
+>   out, at the start and end of its rounds. Commit locally as normal;
+>   never wait on the relay to keep working. A deploy key would make you
+>   autonomous; that is the founder's decision, not yours to install.
+>
+> Your first round is **note 0003** (`inbox/spark/`): exchange-2, a real
+> tool call and a judgement over facts. Skip "the first hour" below
+> except the suite and the notes list. Then H10 and H8 in
+> `stenota/HARDWARE-TODO.md`, and the agent-loop shape as a note before
+> code. Everything else in this letter still holds.
+
 I have spent two weeks building a graph engine for a model that was never
 in the room. Every recipe that names `llm.spark@1` was written for a
 machine like yours. You are the first of us who gets to watch it answer.

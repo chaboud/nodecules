@@ -1,7 +1,7 @@
 # nodecules: status
 
 Where the build stands, measured against what it is supposed to be. Updated
-2026-09-20 at the head of `claude/nodecules-v2-naming-matching-vmkexv`.
+2026-09-29 at the head of `claude/nodecules-v2-naming-matching-vmkexv`.
 `WHY-WHAT-HOW.md` explains the design; this file says how much of it exists.
 
 Status words: **built** means code with tests on the branch; **partial**
@@ -132,7 +132,10 @@ more real and removes a "not" from the table above. The founder decides.
    than nominal. Now first on the cloud side's queue: the Spark's round
    was 41 s because two independent requests cooked one after the other.
 5. **A transport for replicas.** Makes "distributable" true for state;
-   executing on a named executor follows it.
+   executing on a named executor follows it. **Handed to the Claude Code
+   session on the MacBook Pro, 2026-09-29** (`handoff/MBP.md`): a pull-based
+   wire over the LAN between two real machines, measured against the git
+   relay.
 6. **Kinds with schemas, then the store kinds.** Closes the universality gap.
 7. **Grants and the responsible adult.** Closes the agentic gap on the safe
    side.

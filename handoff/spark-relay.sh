@@ -15,13 +15,15 @@
 #                    is clean; otherwise leave it alone and say so.
 #
 # Run `up` before `down`. Exit codes: 0 done, 1 a conflict (nothing changed),
-# 3 left alone on purpose (the Spark is mid-edit or on another branch; the next
-# round retries), 2 usage.
+# 3 left alone on purpose (the Spark or the keyed box is mid-edit, or the Spark
+# is on another branch; the next round retries), 2 usage.
 #
 # Run it ON THE KEYED BOX. Endpoints come from the environment, never from the
 # script: SPARK (ssh host, default spark-b23f; `local` makes SPARK_DIR a path
 # on this machine, which is how the tests run), SPARK_DIR (~/git/<repo>),
-# BRANCH (the shared branch), REPO_DIR (the keyed box's checkout).
+# BRANCH (the shared branch), REPO_DIR (the keyed box's checkout). An unattended
+# runner sets GIT_SSH_COMMAND (e.g. ssh -o BatchMode=yes -o ConnectTimeout=8) so
+# an unreachable Spark fails fast instead of hanging; both ssh paths honour it.
 set -euo pipefail
 
 SPARK="${SPARK:-spark-b23f}"
@@ -35,13 +37,17 @@ if [ "$SPARK" = "local" ]; then
   on_spark() { bash -s -- "$SPARK_DIR" "$BRANCH"; }
 else
   REMOTE="ssh://$SPARK/$SPARK_DIR"
-  on_spark() { ssh "$SPARK" bash -s -- "$SPARK_DIR" "$BRANCH"; }
+  on_spark() { ${GIT_SSH_COMMAND:-ssh} "$SPARK" bash -s -- "$SPARK_DIR" "$BRANCH"; }  # the ssh git uses, so one setting covers both
 fi
 
 g() { git -C "$REPO_DIR" "$@"; }
 
 case "${1:-}" in
   up)
+    if [ -n "$(g status --porcelain --untracked-files=no)" ]; then
+      echo "up: $REPO_DIR has uncommitted changes; left alone. Relay from a clean clone of its own." >&2
+      exit 3
+    fi
     g fetch -q "$REMOTE" "$BRANCH"
     g branch -f relay-spark FETCH_HEAD    # pin it now: the pull below rewrites FETCH_HEAD
     g checkout -q "$BRANCH"

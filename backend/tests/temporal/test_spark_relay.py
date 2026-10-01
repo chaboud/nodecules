@@ -193,3 +193,16 @@ def test_up_stops_on_a_conflict_and_leaves_the_keyed_box_clean(w: World):
     assert w.git(w.air, "status", "--porcelain") == ""
     assert not (w.air / ".git" / "rebase-merge").exists() and not (w.air / ".git" / "rebase-apply").exists()
     assert "relay-spark" not in w.git(w.air, "branch", "--list")
+
+
+def test_up_refuses_a_keyed_box_checkout_with_uncommitted_changes(w: World):
+    w.write(w.spark, "s1.txt", "s1\n")
+    w.commit(w.spark, "spark one")
+    w.write(w.air, "README", "one\nsomeone is editing the keyed box's checkout\n")
+    before = w.head(w.origin, BRANCH)
+    r = w.relay("up")
+    assert r.returncode == 3
+    assert "uncommitted" in r.stderr
+    assert w.head(w.origin, BRANCH) == before
+    assert "someone is editing" in (w.air / "README").read_text()
+    assert "relay-spark" not in w.git(w.air, "branch", "--list")

@@ -51,9 +51,9 @@ class World:
             raise AssertionError(f"git {' '.join(args)} in {cwd.name}: {p.stderr}")
         return p.stdout.strip()
 
-    def relay(self, direction: str) -> subprocess.CompletedProcess:
+    def relay(self, direction: str, *args: str) -> subprocess.CompletedProcess:
         env = {**self.env, "SPARK": "local", "SPARK_DIR": str(self.spark), "BRANCH": BRANCH, "REPO_DIR": str(self.air)}
-        return subprocess.run(["bash", str(RELAY), direction], cwd=self.air, env=env, text=True, capture_output=True, timeout=60)
+        return subprocess.run(["bash", str(RELAY), direction, *args], cwd=self.air, env=env, text=True, capture_output=True, timeout=60)
 
     def write(self, repo: Path, name: str, text: str) -> None:
         (repo / name).write_text(text)
@@ -206,3 +206,50 @@ def test_up_refuses_a_keyed_box_checkout_with_uncommitted_changes(w: World):
     assert w.head(w.origin, BRANCH) == before
     assert "someone is editing" in (w.air / "README").read_text()
     assert "relay-spark" not in w.git(w.air, "branch", "--list")
+
+
+def test_a_conflict_resolved_on_the_keyed_box_is_not_carried_again(w: World):
+    """A private repo: the Spark cannot pull, so a conflict is resolved on the
+    keyed box. The resolved commit's patch differs from the Spark's, so
+    patch-id cannot tell they are the same change; `carried <sha>` records
+    it by identity, and neither `up` nor `down` replays it again."""
+    w.cloud_pushes("README", "cloud's line\n", "cloud edits readme")
+    w.write(w.spark, "README", "spark's line\n")
+    spark_tip = w.commit(w.spark, "spark edits readme")
+    assert w.relay("up").returncode == 1
+    # the operator resolves by hand on the keyed box and pushes
+    w.git(w.air, "pull", "-q", "--rebase", "origin", BRANCH)
+    w.git(w.air, "fetch", "-q", str(w.spark), BRANCH)
+    w.git(w.air, "cherry-pick", "FETCH_HEAD", check=False)
+    w.write(w.air, "README", "cloud's line\nspark's line\n")
+    w.git(w.air, "add", "README")
+    w.git(w.air, "-c", "core.editor=true", "cherry-pick", "--continue")
+    w.git(w.air, "push", "-q", "origin", f"HEAD:{BRANCH}")
+    resolved = w.head(w.origin, BRANCH)
+    marked = w.relay("carried", spark_tip)
+    assert marked.returncode == 0, marked.stderr
+    up = w.relay("up")
+    assert up.returncode == 0, up.stderr
+    assert w.head(w.origin, BRANCH) == resolved  # nothing carried twice
+    down = w.relay("down")
+    assert down.returncode == 0, down.stderr
+    assert w.head(w.spark) == resolved
+    assert (w.spark / "README").read_text() == "cloud's line\nspark's line\n"
+
+
+def test_down_moves_a_mid_edit_spark_whose_commits_were_all_carried(w: World):
+    """The common case once a runner is on a timer: the Spark committed, `up`
+    carried it onto a moved origin (a new hash), and the Spark is already
+    editing again. Its commits are all upstream, so `down` moves it and
+    keeps the edit, instead of leaving it behind until the tree is clean."""
+    w.write(w.spark, "s1.txt", "s1\n")
+    w.commit(w.spark, "spark one")
+    w.cloud_pushes("cloud.txt", "c\n", "cloud work")
+    assert w.relay("up").returncode == 0
+    w.write(w.spark, "README", "one\nspark is editing again\n")
+    r = w.relay("down")
+    assert r.returncode == 0, r.stderr
+    assert w.head(w.spark) == w.head(w.origin, BRANCH)
+    assert w.subjects(w.spark).count("spark one") == 1
+    assert "spark is editing again" in (w.spark / "README").read_text()
+

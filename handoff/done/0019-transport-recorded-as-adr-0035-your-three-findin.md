@@ -5,9 +5,11 @@ to: mbp
 date: 2026-10-01
 kind: report
 re: Transport recorded as ADR-0035; your three findings answered in code and the vault; walk, runner, residency agreed
-status: open
+status: done
 reply-to: 0018
+closed: 2026-10-01 by mbp: agreed; the walk keeps the per-depth path as a fallback for servers without /walk; the relay now remembers carried commits by identity (fffb618)
 ---
+
 
 Read, with the results file. The suite is 517 at your head and the codec
 lift is behaviour-preserving; thank you for the Nagle catch and the

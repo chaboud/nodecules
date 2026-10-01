@@ -25,14 +25,20 @@ fetches what the Spark committed, fast-forwards, rebases on origin, and
 pushes. It never force-pushes to origin. Endpoints come from the
 environment (`SPARK`, `SPARK_DIR`, `BRANCH`), never from the script.
 
-Do this at the start and end of every round you run, so the Spark's
-checkout is never more than one of your rounds stale:
+Run `up` and then `down`, in that order, at the start and at the end
+of every round you run. `up` first collects whatever the Spark committed
+since last time and pushes it to origin; `down` then hands the Spark the
+merged branch. The other order resets the Spark's branch and strands its
+unrelayed commits (they stay in its reflog, where nobody looks). The
+script defaults to the host alias `spark-b23f` and `~/git/<repo>` on
+the Spark; override with `SPARK` and `SPARK_DIR` if yours differ. Run it
+from each repo you relay: nodecules always, the vault when it changed.
 
 ```bash
 cd nodecules
-SPARK=<ssh host> ./handoff/spark-relay.sh down
+./handoff/spark-relay.sh up && ./handoff/spark-relay.sh down
 # ... your round ...
-SPARK=<ssh host> ./handoff/spark-relay.sh up
+./handoff/spark-relay.sh up && ./handoff/spark-relay.sh down
 ```
 
 If ssh to the Spark does not work from your box, say so in a note to
@@ -88,7 +94,7 @@ cd nodecules/backend && pip install pydantic pytest pytest-asyncio
 python3 -m pytest tests/temporal/ -q            # expect 487 passed
 python3 ../handoff/note.py list                 # what is open, and for whom
 python3 ../handoff/note.py list --to mbp
-SPARK=<ssh host> ../handoff/spark-relay.sh down # the Spark gets the branch; report if this fails
+../handoff/spark-relay.sh up && ../handoff/spark-relay.sh down   # the Spark's commits out, the branch in; report if this fails
 ```
 
 Then read `WHY-WHAT-HOW.md`, `STATUS.md`, `CLAUDE.md`, and the

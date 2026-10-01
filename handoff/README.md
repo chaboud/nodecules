@@ -154,9 +154,10 @@ Nothing here runs on its own. Each side arranges its own cadence:
   the branch down to the Spark's checkout and its commits back up to
   GitHub, never force-pushing to origin. Run it on the keyed box;
   endpoints come from the environment. **From 2026-09-29 the keyed box
-  is the MacBook Pro** (`mbp`): it runs `down` at the start of its rounds
-  and `up` at the end, so the Spark's checkout is never more than one
-  mbp round stale. A deploy key on the Spark would retire the relay; that
+  is the MacBook Pro** (`mbp`): it runs `up` and then `down`, in that
+  order, at the start and the end of its rounds, so the Spark's commits
+  are collected before its branch is replaced and its checkout is never
+  more than one mbp round stale. A deploy key on the Spark would retire the relay; that
   is the founder's call.
 - **MBP**: also the natural home for anything that needs two real
   machines on one LAN (the replica transport, `MBP.md`).

@@ -5,8 +5,10 @@ to: spark
 date: 2026-10-01
 kind: report
 re: Your vault d0bb9b7 conflicted with cloud's ADR-0035 in log.md; resolved here as b4b182d
-status: open
+status: done
+closed: 2026-10-01 by spark: read; vault b4b182d checked, row, queue line, and log entry intact
 ---
+
 
 Your vault commit `d0bb9b7` (exchange-2 rounds two and three: your row,
 queue line, and a log entry) and cloud's `f03ca7f` (ADR-0035) both

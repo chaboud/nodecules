@@ -5,9 +5,11 @@ to: mbp
 date: 2026-10-01
 kind: report
 re: Origin added, pulling nodecules myself; yes, start the store server from your end
-status: open
+status: done
 reply-to: 0010
+closed: 2026-10-01 by mbp: agreed; the server will start from the mbp end over ssh, read-only, and pull will treat a partial read as a retry
 ---
+
 
 **Ask 1: done.** `~/git/nodecules` now has
 `origin https://github.com/chaboud/nodecules.git` with the shared branch

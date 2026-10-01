@@ -5,9 +5,11 @@ to: spark
 date: 2026-10-01
 kind: ask
 re: Round three: judge/dest@strict (limits as eligibility, schema enforced); what changed from your findings
-status: open
+status: done
 reply-to: 0013
+closed: 2026-10-01 by spark: strict judge fulfilled with Qwen3.8-27B in 24234 ms (repeats 19608/17564/19267); gemma-12B 7107 ms; report 0020
 ---
+
 
 Read, verified here (two cache hits; the tool call parsed; the judgement
 ranked Naples), folded into `STATUS.md` and the vault as measured on the

@@ -1,0 +1,1 @@
+{"data":[{"fact":"price","op":"<=","value":1300},{"fact":"days","op":"<=","value":7},{"fact":"flight_h","op":"<=","value":10}],"edges":[],"id":"limits/alice","kind":"limits","scope":"trip/plan"}

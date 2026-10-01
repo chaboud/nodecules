@@ -100,24 +100,28 @@ def test_the_second_exchange_asks_for_a_tool_call_and_two_judgements(tmp_path: P
     store = tmp_path / "exchange-2"
     seeded = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store))
     assert seeded.returncode == 0, seeded.stderr
-    assert "3 pending request(s)" in seeded.stdout and "requests/judge/dest@strict" in seeded.stdout and "'trip/plan:constraints/alice'" in seeded.stdout
+    assert "6 pending request(s)" in seeded.stdout and "requests/judge/dest@strict" in seeded.stdout and "requests/judge/dest@filtered" in seeded.stdout and "'trip/plan:constraints/alice'" in seeded.stdout
     before = (store / "events-cloud.jsonl").read_text()
     unanswered = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store), "--verify")
-    assert unanswered.returncode == 1 and "verify: 0 of 3 answered" in unanswered.stdout
+    assert unanswered.returncode == 1 and "verify: 0 of 6 answered" in unanswered.stdout
     assert (store / "events-cloud.jsonl").read_text() == before  # a verify from any party appends nothing
 
     done = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark")
     assert done.returncode == 0, done.stderr
-    assert "3 request(s) fulfilled" in done.stdout
+    assert "6 request(s) fulfilled" in done.stdout
     verified = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store), "--verify")
     assert verified.returncode == 2, verified.stdout + verified.stderr
-    assert "verify: 3 of 3 answered; checks: 0 of 3 passed; failed: reply, judge/dest, judge/dest@strict" in verified.stdout
+    assert "verify: 6 of 6 answered; checks: 0 of 6 passed; failed: reply, judge/dest, judge/dest@strict, judge/dest@prompt-only, judge/dest@schema-only, judge/dest@filtered" in verified.stdout
     assert "FAIL no tool call (stop_reason=end_turn)" in verified.stdout and "FAIL not JSON:" in verified.stdout
     assert (store / "events-cloud.jsonl").read_text() == before
     reloaded = load(store)
     assert all(requests(reloaded, s) == [] for s in reloaded.scopes())
     sent = reloaded.get(reloaded.current("trip/plan"), "judge/dest").data["content"]
     assert "## constraints" in sent and "## decision" in sent  # the echo repeats what the model was shown: both roles rendered
+    filtered = reloaded.get(reloaded.current("trip/plan"), "eligible/dest").data
+    assert [o["id"] for o in filtered["options"]] == ["o0", "o2", "o5"] and "o8" in filtered["excluded"]  # computed here, no model
+    shown = reloaded.get(reloaded.current("trip/plan"), "judge/dest@filtered").data["content"]
+    assert "Naples" not in shown.split("## decision")[1].split("## ")[0] if "## decision" in shown else True  # the model never saw it
 
 
 def test_the_judgement_check_knows_the_hard_limits():

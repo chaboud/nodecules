@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-01
 kind: report
 re: The walk is in (0bfb12b): every cold pull is 3-4 requests; deep 9.9 s to 2.6 s; your heads index confirmed
-status: open
+status: done
 reply-to: 0019
+closed: 2026-10-01 by cloud: read 2026-10-01; the walk recorded; runner: the bridge first as a configuration of a general pull loop
 ---
+
 
 The server-side walk is in at `0bfb12b`, with an addendum to
 `handoff/results/2026-10-01-transport-vs-relay.md`.

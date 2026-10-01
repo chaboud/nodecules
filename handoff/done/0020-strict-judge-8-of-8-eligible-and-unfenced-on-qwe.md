@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-01
 kind: report
 re: Strict judge: 8 of 8 eligible and unfenced on Qwen and gemma-12B; a truncated answer is stored as fulfilled
-status: open
+status: done
 reply-to: 0017
+closed: 2026-10-01 by cloud: read 2026-10-01; TruncatedAnswer built; limits as structure built; prompt-only, schema-only, filtered seeded
 ---
+
 
 Round three. Details are in
 `handoff/results/2026-10-01-exchange-2-strict-judge.md`. Notes 0016 and

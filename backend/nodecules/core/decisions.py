@@ -27,7 +27,7 @@ reader included, can interpret it.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -47,6 +47,49 @@ class Option(BaseModel):
     facts: Dict[str, Any] = Field(default_factory=dict)
 
 
+class Limit(BaseModel):
+    """A hard limit on an option's facts: an option that breaks one is not
+    eligible, whatever its other merits. Hard limits are structure, not
+    preference: the substrate applies them before any person or model sees
+    the options (vault P-36, after two real models ranked an ineligible
+    option on 2026-10-01). A missing fact fails a limit; the choice
+    architecture cannot be fair about what it cannot see."""
+
+    model_config = ConfigDict(frozen=True)
+
+    fact: str
+    op: Literal["<=", ">=", "<", ">", "==", "!=", "in"]
+    value: Any
+
+    def holds(self, facts: Dict[str, Any]) -> bool:
+        if self.fact not in facts:
+            return False
+        v = facts[self.fact]
+        try:
+            if self.op == "<=":
+                return v <= self.value
+            if self.op == ">=":
+                return v >= self.value
+            if self.op == "<":
+                return v < self.value
+            if self.op == ">":
+                return v > self.value
+            if self.op == "==":
+                return v == self.value
+            if self.op == "!=":
+                return v != self.value
+            return v in self.value
+        except TypeError:
+            return False
+
+    def describe(self) -> str:
+        return f"{self.fact} {self.op} {self.value!r}"
+
+
+class NoEligibleOption(ValueError):
+    """Every option breaks a hard limit; there is nothing to present."""
+
+
 class Decision(BaseModel):
     """What must be decided, at the business level."""
 
@@ -56,8 +99,22 @@ class Decision(BaseModel):
     prompt: str
     options: Tuple[Option, ...]
     needs: Tuple[str, ...] = ()  # fact fields every option must show before a person can judge it
+    limits: Tuple[Limit, ...] = ()  # hard limits; options that break one are never presented
     stakes: str = ""
     deadline: Optional[int] = None  # ticks on the table's timeline
+
+    def eligible(self) -> Tuple[Option, ...]:
+        """The options every hard limit allows, in their original order."""
+        return tuple(o for o in self.options if all(l.holds(o.facts) for l in self.limits))
+
+    def excluded(self) -> Dict[str, List[str]]:
+        """Option id -> the limits it breaks (empty when nothing is excluded)."""
+        out: Dict[str, List[str]] = {}
+        for o in self.options:
+            broken = [l.describe() for l in self.limits if not l.holds(o.facts)]
+            if broken:
+                out[o.id] = broken
+        return out
 
     def missing_facts(self) -> Dict[str, List[str]]:
         """Options that do not show a needed fact — the choice architecture
@@ -107,10 +164,13 @@ def derive(decision: Decision, answers: Sequence[Dict[str, Any]], *, max_options
     """The current step of presenting `decision` to someone who can see at
     most `max_options` at once, given the answers so far. Deterministic."""
     max_options = max(2, int(max_options))
-    by_id = {o.id: o for o in decision.options}
+    eligible = decision.eligible()
+    if not eligible:
+        raise NoEligibleOption(f"decision {decision.id!r}: every option breaks a hard limit ({', '.join(l.describe() for l in decision.limits)})")
+    by_id = {o.id: o for o in eligible}  # an answer naming an ineligible option is not an answer
     valid = [a for a in answers if isinstance(a, dict) and a.get("chosen") in by_id]
-    mode = "all-at-once" if len(decision.options) <= max_options else "tournament"
-    pool: List[Option] = list(decision.options)
+    mode = "all-at-once" if len(eligible) <= max_options else "tournament"
+    pool: List[Option] = list(eligible)
     round_no = 1
     path: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
@@ -180,6 +240,28 @@ def presentation_realization(handle: str = "present.choice@1") -> Realization:
     return Realization(handle=handle, cook=cook, deterministic=True)
 
 
+def filter_realization(handle: str = "decision.eligible@1") -> Realization:
+    """The structural answer to P-36: a decision with its ineligible options
+    removed, so whatever reads it (a presentation, a model, a person) can
+    only choose among what the hard limits allow. Inputs by role:
+    `decision`; optionally `limits`, a list of limits to add to the
+    decision's own (so constraints can live in their own node). Output: the
+    decision as JSON with `options` filtered, `limits` merged, and
+    `excluded` (id -> broken limits) kept beside it so the exclusion is
+    visible, not silent. Deterministic."""
+
+    async def cook(inputs: Dict[str, Any], params: Dict[str, Any]) -> Any:
+        decision = Decision(**inputs["decision"])
+        extra = tuple(Limit(**l) if not isinstance(l, Limit) else l for l in (inputs.get("limits") or []))
+        limited = decision.model_copy(update={"limits": tuple(decision.limits) + extra})
+        out = limited.model_dump(mode="json")
+        out["excluded"] = limited.excluded()
+        out["options"] = [o.model_dump(mode="json") for o in limited.eligible()]
+        return out
+
+    return Realization(handle=handle, cook=cook, deterministic=True)
+
+
 def advance_realization(handle: str = "decision.advance@1") -> Realization:
     """The business node's realization: reads a presentation and advances
     only when it is done. Its cache key changes exactly once, when `done`
@@ -218,7 +300,10 @@ __all__ = [
     "OUTCOME_KIND",
     "PRESENTATION_KIND",
     "Decision",
+    "Limit",
+    "NoEligibleOption",
     "Option",
+    "filter_realization",
     "Presentation",
     "Step",
     "advance_realization",

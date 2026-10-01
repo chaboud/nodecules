@@ -38,6 +38,15 @@ def _plain(obj: Any) -> Any:
     return obj
 
 
+class TruncatedAnswer(Exception):
+    """The model stopped because it ran out of tokens with content in hand.
+    Half an answer stored as a fulfilment would be a cache hit forever
+    (found on the Spark, 2026-10-01: a JSON object cut mid-field was
+    stored and the request cleared), so the production fails instead and
+    the request stays pending; the message says how much arrived and what
+    the budget was."""
+
+
 class EmptyAnswer(Exception):
     """The model returned no content and no tool calls. A production that
     stored that would be a cache hit forever, so it fails instead: the
@@ -92,6 +101,11 @@ def llm_realization(
                 else ("the answer was cut off before any content: raise max_tokens" if response.stop_reason == "max_tokens" else "the engine returned nothing")
             )
             raise EmptyAnswer(f"no content and no tool calls (stop_reason={response.stop_reason}, reasoning={reasoning} chars, max_tokens={int(params.get('max_tokens', 4_096))}); {hint}")
+        if response.stop_reason == "max_tokens":
+            raise TruncatedAnswer(
+                f"the answer was cut off by max_tokens={int(params.get('max_tokens', 4_096))} after {len(response.content)} chars of content"
+                f" and {len(getattr(response, 'reasoning', '') or '')} chars of reasoning; raise max_tokens, or switch thinking off through the provider (extra_body)"
+            )
         return {
             "content": response.content,
             "tool_calls": [_plain(tc) for tc in response.tool_calls],
@@ -102,4 +116,4 @@ def llm_realization(
     return Realization(handle=handle, cook=cook, deterministic=deterministic)
 
 
-__all__ = ["EmptyAnswer", "llm_realization", "render_inputs"]
+__all__ = ["EmptyAnswer", "TruncatedAnswer", "llm_realization", "render_inputs"]

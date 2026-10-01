@@ -130,3 +130,39 @@ async def test_an_empty_answer_is_a_failed_production_that_says_where_the_tokens
     assert out.outcome == "failed" and not out.cooked
     assert out.error.startswith("EmptyAnswer:") and "reasoning=520 chars" in out.error and "max_tokens=600" in out.error and "switch thinking off" in out.error
     assert store.get(store.current(CHAT), envelope_id("reply")) is None  # nothing stored, nothing to hit
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_answer_is_a_failed_production_not_a_fulfilment():
+    """Found on the Spark, 2026-10-01 (note 0020): a thinking model with a
+    raised budget returned half a JSON object with finish length, and the
+    production was stored as fulfilled. Now max_tokens with content in hand
+    fails the production, so nothing half-finished becomes a cache hit."""
+    from typing import Any, Dict, List, Optional
+
+    from nodecules.core.llm_providers import ToolAwareProvider, ToolCallResponse, ToolSchema
+
+    class CutOff(ToolAwareProvider):
+        async def generate_with_tools(self, messages: List[Dict[str, Any]], *, tools: Optional[List[ToolSchema]] = None, response_schema: Optional[Dict[str, Any]] = None, model: str, temperature: float = 0.2, max_tokens: int = 4_096) -> ToolCallResponse:
+            return ToolCallResponse(content='{"ranked": [{"id": "o0", "why": "cheap"}, {"id": "o2", "wh', tool_calls=[], stop_reason="max_tokens", raw={}, reasoning="x" * 10805)
+
+        @property
+        def supports_tool_use(self) -> bool:
+            return False
+
+        @property
+        def supports_response_schema(self) -> bool:
+            return True
+
+    store = Store()
+    tx = store.transaction(LIB, author="dev")
+    tx.put(Node(id="recipes/assistant", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "llm.cut@1", "params": {"model": "t", "max_tokens": 4000}}))
+    tx.commit()
+    tx = store.transaction(CHAT, author="dev")
+    tx.put(Node(id="reply", kind="chat.reply", scope=CHAT, edges=(Edge(target="strips/messages", pattern=AllPattern(), role="messages"), Edge(target="recipes/assistant", scope=LIB, role=RECIPE_ROLE))))
+    tx.commit()
+    strip_append(store, CHAT, "strips/messages", {"role": "user", "content": "rank them"}, author="alice")
+    out = await Generator(store, [llm_realization(CutOff(), "llm.cut@1")]).produce(CHAT, "reply")
+    assert out.outcome == "failed" and not out.cooked
+    assert out.error.startswith("TruncatedAnswer:") and "max_tokens=4000" in out.error and "58 chars of content" in out.error and "10805 chars of reasoning" in out.error
+    assert store.get(store.current(CHAT), envelope_id("reply")) is None

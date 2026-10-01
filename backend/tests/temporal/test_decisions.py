@@ -165,3 +165,52 @@ async def test_a_producer_that_has_the_realization_clears_the_request_it_answers
     assert m.author == "spark" and m.note.startswith("fulfil consider/dest")
     back = await here.produce(BIZ, "consider/dest")
     assert back.cache_hit and back.node.data["summaries"]["o9"] == "Option 9"
+
+
+def test_hard_limits_are_structure_an_ineligible_option_is_never_presented_and_cannot_be_chosen():
+    """P-36: two real models ranked an option the hard limits exclude. The
+    substrate applies limits before anyone sees the options: derive() shows
+    only eligible options, in every mode, and an answer naming an ineligible
+    one is not an answer."""
+    from nodecules.core.decisions import Limit, NoEligibleOption
+
+    limits = (Limit(fact="price", op="<=", value=104), Limit(fact="days", op="<=", value=5))
+    d = DEC.model_copy(update={"limits": limits})
+    ids = [o.id for o in d.eligible()]
+    assert ids == ["o0", "o1", "o2", "o4"]  # price 100..104 and days 3,4,5,3,... : o3 has 6 days
+    assert d.excluded()["o3"] == ["days <= 5"] and "price <= 104" in d.excluded()["o9"]
+    shown = derive(d, [], max_options=16)
+    assert shown.mode == "all-at-once" and {o.id for o in shown.step.options} == set(ids)
+    small = derive(d, [], max_options=2)
+    assert small.mode == "tournament" and all(o.id in ids for o in small.step.options)
+    cheated = derive(d, [{"step": "choose", "chosen": "o9"}], max_options=16)
+    assert not cheated.done and cheated.step is not None  # o9 is not among the choices; nothing advanced
+    chosen = derive(d, [{"step": "choose", "chosen": "o2"}], max_options=16)
+    assert chosen.done and chosen.chosen == "o2"
+    none = DEC.model_copy(update={"limits": (Limit(fact="price", op="<", value=0),)})
+    with pytest.raises(NoEligibleOption):
+        derive(none, [], max_options=4)
+    assert not Limit(fact="visa", op="==", value="none").holds({"price": 1})  # a missing fact fails a limit
+
+
+@pytest.mark.asyncio
+async def test_the_filter_realization_hands_downstream_only_eligible_options_with_the_exclusions_visible():
+    from nodecules.core.decisions import filter_realization
+
+    store = Store()
+    tx = store.transaction(LIB, author="dev")
+    tx.put(Node(id="recipes/eligible", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "decision.eligible@1", "params": {}}))
+    tx.commit()
+    tx = store.transaction(BIZ, author="butler")
+    tx.put(Node(id="decisions/dest", kind="decision", scope=BIZ, data=DEC.model_dump(mode="json")))
+    tx.put(Node(id="limits/alice", kind="limits", scope=BIZ, data=[{"fact": "price", "op": "<=", "value": 102}]))
+    tx.put(Node(id="eligible/dest", kind="decision", scope=BIZ, edges=(Edge(target="decisions/dest", role="decision"), Edge(target="limits/alice", role="limits"), Edge(target="recipes/eligible", scope=LIB, role=RECIPE_ROLE))))
+    tx.commit()
+    out = await Generator(store, [filter_realization()], author="butler").produce(BIZ, "eligible/dest")
+    assert out.cooked and out.reproducibility == "exact"
+    data = out.node.data
+    assert [o["id"] for o in data["options"]] == ["o0", "o1", "o2"]
+    assert data["limits"] == [{"fact": "price", "op": "<=", "value": 102}]
+    assert set(data["excluded"]) == {f"o{i}" for i in range(3, 16)} and data["excluded"]["o9"] == ["price <= 102"]
+    again = Decision(**data)  # the filtered decision is a decision; `excluded` is ignored by the model
+    assert len(again.options) == 3 and again.limits[0].fact == "price"

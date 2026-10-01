@@ -139,7 +139,7 @@ the cloud fulfils on its next turn.
 | file or directory | owner | the other side |
 |---|---|---|
 | `STATUS.md`, `REFERENCE-MODEL.md`, `WHY-WHAT-HOW.md`, `CLAUDE.md` | cloud | proposes edits in a note, with the exact text |
-| the vault (`ChaboudPrivateWiki`, the operating model: founder, 2026-10-01) | cloud anneals it and keeps the ADRs and directives | every seat edits its own row in `LLM_Wiki/state-of-play.md`'s working split and its own line in the queue, appends to `LLM_Wiki/log.md`, adds result pages that cite a `handoff/results/` file, and resolves an open question with a measurement; pull before you write, and keep to your own sections |
+| the vault (`ChaboudPrivateWiki`, the operating model: founder, 2026-10-01) | cloud anneals it and keeps the ADRs and directives | every seat edits its own row in `LLM_Wiki/state-of-play.md`'s working split and its own line in the queue, appends to `LLM_Wiki/log.md` (its `.gitattributes` merges concurrent appends by union, so two seats logging at once no longer conflict), adds result pages that cite a `handoff/results/` file, and resolves an open question with a measurement; pull before you write, and keep to your own sections |
 | `backend/nodecules/core/*` | cloud, for the substrate's shape | Spark adds modules and fixes bugs it can reproduce, with tests, and says so in a report note; changes to an existing module's contract go through a note first |
 | `handoff/results/*`, `handoff/inbox/cloud/*`, `handoff/stores/*` (answers) | spark | reads |
 | `handoff/inbox/spark/*`, `handoff/inbox/mbp/*`, `handoff/stores/*` (requests) | cloud | reads |

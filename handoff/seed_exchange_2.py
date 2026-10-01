@@ -18,7 +18,17 @@ carried only a name, days, and a price). This store asks for both:
                          stated as eligibility and a response_schema on
                          the recipe (the Spark's suggestions in note
                          0013, after both models ranked an ineligible
-                         option and one wrapped its JSON in a fence)
+                         option and one wrapped its JSON in a fence);
+                         8 of 8 runs eligible and unfenced (note 0020)
+  trip/plan:judge/dest@prompt-only   the eligibility sentence, no schema
+  trip/plan:judge/dest@schema-only   the schema, the original prompt
+                         (these two split the strict round's two changes)
+  trip/plan:judge/dest@filtered      the original prompt and no schema over
+                         `eligible/dest`, the decision with its ineligible
+                         options removed by the substrate
+                         (`decision.eligible@1`, produced here, no model):
+                         the structural answer to P-36, where the model
+                         can only order what the limits allow
 
 Produced here with no model, so each becomes a request for
 `llm.spark@1`. `--verify` reports, per step, whether it came back as a
@@ -46,7 +56,7 @@ from typing import Tuple
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "backend"))
 
-from nodecules.core.decisions import Decision, Option  # noqa: E402
+from nodecules.core.decisions import Decision, Limit, Option, filter_realization  # noqa: E402
 from nodecules.core.deferral import requests  # noqa: E402
 from nodecules.core.disk import DiskBacking  # noqa: E402
 from nodecules.core.generation import RECIPE_ROLE, RECIPE_TEMPLATE_KIND, Generator  # noqa: E402
@@ -99,6 +109,9 @@ STRICT_SYSTEM = (
 )
 
 
+LIMITS = [{"fact": "price", "op": "<=", "value": CONSTRAINTS["budget"]}, {"fact": "days", "op": "<=", "value": CONSTRAINTS["max_days"]}, {"fact": "flight_h", "op": "<=", "value": CONSTRAINTS["max_flight_h"]}]
+
+
 def eligible_ids() -> set:
     """The ids the hard limits leave, computed from the facts."""
     return {o.id for o in DEC.options if o.facts["price"] <= CONSTRAINTS["budget"] and o.facts["days"] <= CONSTRAINTS["max_days"] and o.facts["flight_h"] <= CONSTRAINTS["max_flight_h"]}
@@ -116,6 +129,21 @@ def declare(store: Store) -> None:
             tx.put(Node(id="constraints/alice", kind="constraints", scope=BIZ, data=CONSTRAINTS))
         tx.put(Node(id="judge/dest@strict", kind="llm.consideration", scope=BIZ, edges=(Edge(target="decisions/dest", role="decision"), Edge(target="constraints/alice", role="constraints"), Edge(target="recipes/judge-strict", scope=LIB, role=RECIPE_ROLE))))
         tx.commit("the same judgement, hard limits as eligibility")
+    if "recipes/eligible" not in have:
+        tx = store.transaction(LIB, author="cloud")
+        tx.put(Node(id="recipes/eligible", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": "decision.eligible@1", "params": {}}))
+        tx.put(Node(id="recipes/judge-prompt-only", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": HANDLE, "params": {"system": STRICT_SYSTEM + " Answer as JSON only: {\"ranked\": [{\"id\": ..., \"why\": ...}, ...]}.", "max_tokens": 800}}))
+        tx.put(Node(id="recipes/judge-schema-only", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": HANDLE, "params": {"system": "You are helping a traveller choose. Use the decision's option facts and the traveller's constraints. Rank the best three options and give one line of reasoning each.", "response_schema": JUDGE_SCHEMA, "max_tokens": 800}}))
+        tx.commit("the strict round split in two, and eligibility as structure")
+        tx = store.transaction(BIZ, author="cloud")
+        if "decisions/dest" not in set(store.current(BIZ).ids()):
+            tx.put(Node(id="decisions/dest", kind="decision", scope=BIZ, data=DEC.model_dump(mode="json")))
+            tx.put(Node(id="constraints/alice", kind="constraints", scope=BIZ, data=CONSTRAINTS))
+        tx.put(Node(id="limits/alice", kind="limits", scope=BIZ, data=LIMITS))
+        tx.put(Node(id="eligible/dest", kind="decision", scope=BIZ, edges=(Edge(target="decisions/dest", role="decision"), Edge(target="limits/alice", role="limits"), Edge(target="recipes/eligible", scope=LIB, role=RECIPE_ROLE))))
+        for variant, recipe, decision in (("prompt-only", "recipes/judge-prompt-only", "decisions/dest"), ("schema-only", "recipes/judge-schema-only", "decisions/dest"), ("filtered", "recipes/judge", "eligible/dest")):
+            tx.put(Node(id=f"judge/dest@{variant}", kind="llm.consideration", scope=BIZ, edges=(Edge(target=decision, role="decision"), Edge(target="constraints/alice", role="constraints"), Edge(target=recipe, scope=LIB, role=RECIPE_ROLE))))
+        tx.commit("three more judgements: prompt only, schema only, and over the filtered decision")
     if "recipes/tools" in have:
         return
     tx = store.transaction(LIB, author="cloud")
@@ -167,7 +195,14 @@ def _check_ranking(data: dict) -> Tuple[bool, str]:
     return not fenced, text + f" · all three eligible ({sorted(eligible)})"
 
 
-STEPS = ((CHAT, "reply", _check_tools), (BIZ, "judge/dest", _check_ranking), (BIZ, "judge/dest@strict", _check_ranking))
+STEPS = (
+    (CHAT, "reply", _check_tools),
+    (BIZ, "judge/dest", _check_ranking),
+    (BIZ, "judge/dest@strict", _check_ranking),
+    (BIZ, "judge/dest@prompt-only", _check_ranking),
+    (BIZ, "judge/dest@schema-only", _check_ranking),
+    (BIZ, "judge/dest@filtered", _check_ranking),
+)
 
 
 async def main(store_dir: str, verify: bool, by: str) -> int:
@@ -178,7 +213,7 @@ async def main(store_dir: str, verify: bool, by: str) -> int:
     if not verify:
         tracker.add_sink(JsonlSink(Path(store_dir) / f"events-{by}.jsonl"))  # verifying writes nothing, whoever runs it
     declare(store)
-    here = Generator(store, [], author=by, tracker=tracker, defer=True)
+    here = Generator(store, [filter_realization()], author=by, tracker=tracker, defer=True)  # eligibility is computed here; only the judgements need a model
     hits, passed, failed = 0, 0, []
     for scope, node, check in STEPS:
         g = await here.produce(scope, node)

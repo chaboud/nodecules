@@ -14,11 +14,12 @@ content-addressed, so integrity is the hash and nothing else: the client
 re-checks every object it receives and refuses a peer that sends anything
 that does not hash to its name (`Corrupt`), before anything is merged.
 
-Sync is **pull**. `pull(store, peer)` asks the peer for its heads, walks
-the heads' manifest DAGs down to manifests the store already has (one
-batched request per depth, all scopes together), fetches the bodies those
-manifests bind that the store lacks (one batched request), imports parents
-before children, and
+Sync is **pull**. `pull(store, peer)` asks the peer for its heads, asks
+it to walk the heads' manifest DAGs down to what the store already has
+(`/walk`, one request however deep the history; against a peer without
+`/walk`, one batched request per depth, all scopes together), fetches the
+bodies those manifests bind that the store lacks (one batched request),
+imports parents before children, and
 brings each head in with `replica.merge_head`, the rule `attach` uses for a
 git-merged directory. Nothing is pushed into a store; which heads it takes
 stays local.
@@ -41,6 +42,11 @@ Endpoints:
     POST /objects          {"manifests": [hash...], "bodies": [hash...]}
                            -> {"manifests": {hash: obj|null}, "bodies": {hash: obj|null},
                                "skeletons": {hash: obj}}   (for bodies the peer lacks)
+    POST /walk             {"heads": [hash...], "have": [hash...], "limit": n}
+                           -> {"manifests": {hash: obj}, "missing": [hash...], "truncated": bool}
+                           the manifests reachable from heads, breadth first, stopping at
+                           anything in have, at most limit of them; missing are the ones
+                           reached that cannot be served yet
 
 No clock here: the caller measures time (`handoff/transport.py` does).
 """
@@ -49,6 +55,7 @@ from __future__ import annotations
 
 import heapq
 import http.client
+from collections import deque
 import json
 import re
 import threading
@@ -62,7 +69,9 @@ from .replica import merge_head
 from .store import Backing, Edge, Manifest, Node, Store
 
 HASH = re.compile(r"^[0-9a-f]{64}$")
-MAX_BATCH = 10_000  # hashes per /objects request
+MAX_BATCH = 10_000  # hashes per /objects request, and the most manifests one /walk returns
+WALK_LIMIT = 1_000  # manifests per /walk response unless the caller asks otherwise
+HAVE_DEPTH = 64  # first-parent ancestors of each local head offered as `have`
 MAX_REQUEST = 4 * 1024 * 1024  # bytes of request body the server reads
 
 
@@ -100,6 +109,36 @@ def _skeleton_json(b: Backing, h: str) -> Optional[dict]:
 _SINGLE = {"manifest": _manifest_json, "body": _body_json, "skeleton": _skeleton_json}
 
 
+def _walk(b: Backing, heads: List[str], have: Set[str], limit: int) -> dict:
+    """Manifests reachable from `heads`, breadth first, stopping at `have`."""
+    out: Dict[str, dict] = {}
+    missing: List[str] = []
+    seen = set(have)
+    queue = deque(heads)
+    truncated = False
+    while queue:
+        h = queue.popleft()
+        if h in seen:
+            continue
+        if len(out) >= limit:
+            truncated = True
+            break
+        seen.add(h)
+        m = _quietly(b.get_manifest, h)
+        if m is None:
+            missing.append(h)
+            continue
+        out[h] = encode_manifest(m)
+        for p in (m.parent, m.merge_parent):
+            if p and p not in seen:
+                queue.append(p)
+    return {"manifests": out, "missing": missing, "truncated": truncated}
+
+
+def _hashes(xs) -> bool:
+    return isinstance(xs, list) and all(isinstance(h, str) and HASH.match(h) for h in xs)
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # keep-alive: a pull is several requests on one connection
     disable_nagle_algorithm = True  # headers and body are two writes; Nagle held the second ~40 ms per request
@@ -130,15 +169,27 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         backing: Backing = self.server.backing  # type: ignore[attr-defined]
-        if self.path.split("?", 1)[0] != "/objects":
-            return self._send(404, {"error": "no such endpoint"})
+        path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_REQUEST:
+            self.close_connection = True  # the body stays unread, so this connection cannot carry another request
             return self._send(413, {"error": "request too large"})
+        raw = self.rfile.read(length)  # read before any answer, so a kept-alive connection stays in step
+        if path not in ("/objects", "/walk"):
+            return self._send(404, {"error": "no such endpoint"})
         try:
-            req = json.loads(self.rfile.read(length) or b"{}")
-            ms, bs = list(req.get("manifests", [])), list(req.get("bodies", []))
-        except (ValueError, AttributeError, TypeError):
+            req = json.loads(raw or b"{}")
+            if not isinstance(req, dict):
+                raise TypeError
+        except (ValueError, TypeError):
+            return self._send(400, {"error": "expected a JSON object"})
+        if path == "/walk":
+            heads, have, limit = req.get("heads", []), req.get("have", []), req.get("limit", WALK_LIMIT)
+            if not (_hashes(heads) and _hashes(have)) or len(heads) > MAX_BATCH or not isinstance(limit, int) or isinstance(limit, bool) or not 0 < limit <= MAX_BATCH:
+                return self._send(400, {"error": "heads and have are lists of hashes; limit is 1..%d" % MAX_BATCH})
+            return self._send(200, _walk(backing, heads, set(have), limit))
+        ms, bs = req.get("manifests", []), req.get("bodies", [])
+        if not (isinstance(ms, list) and isinstance(bs, list)):
             return self._send(400, {"error": "expected {manifests: [...], bodies: [...]}"})
         if len(ms) + len(bs) > MAX_BATCH or not all(isinstance(h, str) and HASH.match(h) for h in ms + bs):
             return self._send(400, {"error": "hashes only, at most %d" % MAX_BATCH})
@@ -201,6 +252,7 @@ class Peer(Backing):
         self._conn: Optional[http.client.HTTPConnection] = None
         self.requests = 0
         self.bytes = 0
+        self.walks = True  # until the peer says it has no /walk
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> Optional[dict]:
         data = None if body is None else json.dumps(body).encode("utf-8")
@@ -254,6 +306,23 @@ class Peer(Backing):
         return None if raw is None else decode_skeleton(raw)
 
     # -- batched ---------------------------------------------------------------------------
+
+    def walk(
+        self, heads: Iterable[str], have: Iterable[str], limit: int = WALK_LIMIT
+    ) -> Optional[Tuple[Dict[str, Manifest], Set[str], bool]]:
+        """The manifests reachable from `heads` that are not behind `have`,
+        each checked against its hash; the ones the peer reached and could
+        not serve; and whether the response stopped at `limit`. None when
+        the peer has no /walk (an older server), and it is not asked again."""
+        if not self.walks:
+            return None
+        resp = self._request("POST", "/walk", {"heads": list(heads), "have": list(have), "limit": limit})
+        if resp is None:
+            self.walks = False
+            self.close()  # a server from before /walk answers 404 without reading the body: start a fresh connection
+            return None
+        got = {h: decode_manifest(raw, h) for h, raw in resp["manifests"].items()}
+        return got, set(resp.get("missing", [])), bool(resp.get("truncated"))
 
     def fetch(
         self, manifests: Iterable[str] = (), bodies: Iterable[str] = ()
@@ -328,15 +397,42 @@ def _genesis(scope: str) -> Manifest:
     return Store().current(scope)
 
 
-def pull(store: Store, peer: Peer, *, scopes: Optional[Iterable[str]] = None, author: str = "pull") -> PullReport:
+def _have(store: Store, scopes: Iterable[str]) -> List[str]:
+    """What to tell a peer we hold, so its walk stops early: each scope's
+    genesis, its head, and the head's recent first-parent ancestors. A
+    walk that goes past these over-fetches, which costs bytes, not
+    correctness: what we already hold is skipped on arrival."""
+    out: List[str] = []
+    for scope in scopes:
+        out.append(_genesis(scope).content_hash())
+        if scope not in store.scopes():
+            continue
+        m: Optional[Manifest] = store.current(scope)
+        for _ in range(HAVE_DEPTH):
+            if m is None:
+                break
+            out.append(m.content_hash())
+            m = store.manifest(m.parent) if m.parent else None
+    return sorted(set(out))
+
+
+def pull(
+    store: Store,
+    peer: Peer,
+    *,
+    scopes: Optional[Iterable[str]] = None,
+    author: str = "pull",
+    walk_limit: int = WALK_LIMIT,
+) -> PullReport:
     """Bring `store` up to date with `peer` for every scope the peer has
     (or only `scopes`). Raises `Corrupt` if the peer sends an object that
     does not hash to its name, before anything is merged; anything the
     peer cannot serve yet becomes a `retry` instead of an import.
 
-    Every request is a round trip, so the walk is batched across scopes:
-    one request for the heads, one per DAG depth for the manifests of all
-    scopes together, and one for all the bodies."""
+    Every request is a round trip, so: one request for the heads; the
+    peer walks the manifest DAGs (one /walk per `walk_limit` manifests);
+    one request for all the bodies. Against a peer without /walk, one
+    request per DAG depth for the manifests of all scopes together."""
     report = PullReport()
     r0, b0 = peer.requests, peer.bytes
     wanted = None if scopes is None else set(scopes)
@@ -346,10 +442,30 @@ def pull(store: Store, peer: Peer, *, scopes: Optional[Iterable[str]] = None, au
         if store.manifest(genesis.content_hash()) is None:
             store.import_manifest(genesis)
 
-    # 1. The manifests we lack, down to the first ones we have: one request per depth.
+    # 1. The manifests we lack, down to the first ones we have: the peer walks them.
     fetched: Dict[str, Manifest] = {}
     unserved: Set[str] = set()
     frontier = sorted({h for hs in remote.values() for h in hs if store.manifest(h) is None})
+
+    def parents_to_fetch(ms: Iterable[Manifest]) -> List[str]:
+        return sorted({
+            p for m in ms for p in (m.parent, m.merge_parent)
+            if p and store.manifest(p) is None and p not in fetched and p not in unserved
+        })
+
+    have = _have(store, remote) if frontier else []
+    while frontier:
+        walked = peer.walk(frontier, have, walk_limit)
+        if walked is None:
+            break  # no /walk there: the per-depth path below
+        got, missing, truncated = walked
+        new = {h: m for h, m in got.items() if store.manifest(h) is None and h not in fetched}
+        fetched.update(new)
+        unserved |= missing
+        frontier = parents_to_fetch(new.values())
+        if not new and not missing:
+            break  # the peer walked nothing for a frontier it named: per-depth below
+    # Per depth: a peer without /walk, or whatever its walk left.
     while frontier:
         got, _, _ = peer.fetch(manifests=frontier)
         nxt: Set[str] = set()

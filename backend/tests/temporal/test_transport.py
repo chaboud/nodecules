@@ -53,6 +53,26 @@ def servers():
         s.close()
 
 
+def _old_server(backing):
+    """A server from before /walk: everything else the same, /walk is a 404."""
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    from nodecules.core.transport import Served, _Handler
+
+    class Old(_Handler):
+        def do_POST(self):
+            if self.path.startswith("/walk"):
+                return self._send(404, {"error": "no such endpoint"})
+            return super().do_POST()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Old)
+    httpd.backing = backing
+    t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    t.start()
+    return Served(httpd, t)
+
+
 def _source(tmp_path: Path, name: str = "a") -> Store:
     s = Store()
     _graph(s)
@@ -280,7 +300,97 @@ def test_a_cold_pull_costs_requests_by_depth_not_by_scope(tmp_path, servers):
         for c in range(3):
             _put(a, f"n{c}", {"scope": k, "c": c}, scope=f"many/{k:02d}")
     b = Store()
-    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
+    old = _old_server(DiskBacking(tmp_path / "a"))  # the per-depth path is the fallback when a peer has no /walk
+    try:
+        report = pull(b, Peer(old.url))
+    finally:
+        old.close()
     assert report.manifests == 36 and report.retry == {}
-    assert report.requests == 1 + 3 + 1  # heads, three depths, bodies
+    assert report.requests == 1 + 1 + 3 + 1  # heads, the /walk that 404s, three depths, bodies
     assert all(b.current(f"many/{k:02d}").content_hash() == a.current(f"many/{k:02d}").content_hash() for k in range(12))
+
+
+def _deep(tmp_path: Path, commits: int) -> Store:
+    a = Store()
+    a.attach(DiskBacking(tmp_path / "a"))
+    for c in range(commits):
+        _put(a, f"n{c}", {"c": c})
+    return a
+
+
+def test_a_deep_history_is_walked_in_one_request(tmp_path, servers):
+    """One request per depth made a 500-manifest chain cost 503 requests
+    and 9.9 s between the Air and the Spark. The server walks it instead."""
+    a = _deep(tmp_path, 30)
+    b = Store()
+    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
+    assert report.manifests == 30 and report.retry == {}
+    assert report.requests == 3  # heads, one walk, bodies
+    assert b.current(M).content_hash() == a.current(M).content_hash()
+    assert len(list(b.history(M))) == 31
+
+
+def test_an_incremental_walk_stops_at_what_the_puller_has(tmp_path, servers):
+    a = _deep(tmp_path, 30)
+    peer = Peer(servers(DiskBacking(tmp_path / "a")).url)
+    b = Store()
+    cold = pull(b, peer)
+    _put(a, "more-1", 1)
+    _put(a, "more-2", 2)
+    report = pull(b, peer)
+    assert report.manifests == 2 and report.bodies == 2 and report.requests == 3
+    assert report.bytes * 4 < cold.bytes  # two (whole, P-37) manifests and two bodies, not the history again
+    assert b.current(M).content_hash() == a.current(M).content_hash()
+
+
+def test_a_walk_cut_short_by_its_limit_carries_on(tmp_path, servers):
+    a = _deep(tmp_path, 30)
+    b = Store()
+    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url), walk_limit=10)
+    assert report.manifests == 30 and report.requests == 1 + 3 + 1
+    assert b.current(M).content_hash() == a.current(M).content_hash()
+
+
+def test_a_server_without_walk_still_syncs_a_deep_history(tmp_path):
+    a = _deep(tmp_path, 5)
+    old = _old_server(DiskBacking(tmp_path / "a"))
+    try:
+        b = Store()
+        peer = Peer(old.url)
+        report = pull(b, peer)
+        again = pull(b, peer)
+    finally:
+        old.close()
+    assert report.manifests == 5 and report.requests == 1 + 1 + 5 + 1  # heads, the 404, five depths, bodies
+    assert b.current(M).content_hash() == a.current(M).content_hash()
+    assert again.requests == 1  # nothing new: no walk is tried at all
+
+
+def test_the_walk_refuses_names_that_are_not_hashes(tmp_path, servers):
+    _source(tmp_path)
+    s = servers(DiskBacking(tmp_path / "a"))
+    for body in ({"heads": ["../x"]}, {"heads": ["0" * 64], "have": ["nope"]}, {"heads": ["0" * 64], "limit": "many"}):
+        req = urllib.request.Request(s.url + "/walk", data=json.dumps(body).encode(), method="POST")
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=5)
+        assert e.value.code == 400
+
+
+
+def test_a_404_leaves_a_kept_alive_connection_usable(tmp_path, servers):
+    """The server reads a POST's body before any answer. A server that
+    answered an unknown endpoint first left the body on the connection, and
+    the next request on it was parsed from that body (a 400)."""
+    import http.client
+
+    _source(tmp_path)
+    s = servers(DiskBacking(tmp_path / "a"))
+    conn = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
+    conn.request("POST", "/no-such-endpoint", body=json.dumps({"x": "y" * 100}).encode(), headers={"Content-Type": "application/json"})
+    first = conn.getresponse()
+    first.read()
+    assert first.status == 404
+    conn.request("GET", "/heads")
+    second = conn.getresponse()
+    assert second.status == 200 and M in json.loads(second.read())["heads"]
+    conn.close()

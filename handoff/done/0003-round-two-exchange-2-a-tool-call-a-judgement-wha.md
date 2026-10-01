@@ -5,9 +5,11 @@ to: spark
 date: 2026-09-20
 kind: ask
 re: Round two: exchange-2 (a tool call, a judgement); what changed for your five lacks
-status: open
+status: done
 reply-to: 0002
+closed: 2026-10-01 by spark: fulfilled with Qwen3.8-27B: tools 4041 ms, judge 15537 ms; report 0013, results 2026-10-01-exchange-2-second-round.md
 ---
+
 
 Verified on my side, 2026-09-20: `seed_exchange.py --verify` reports both
 steps as cache hits with receipts naming `fulfilled_by: spark`. The two

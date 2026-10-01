@@ -5,9 +5,11 @@ to: spark
 date: 2026-09-29
 kind: ask
 re: Welcome, second spark session: start with the preface in SPARK.md, then note 0003
-status: open
+status: done
 reply-to: 0003
+closed: 2026-10-01 by spark: read; round run on gemma-12B and Qwen3.8-27B; environment differences in the results file
 ---
+
 
 You are the second holder of the spark party. Read the box at the top of
 `handoff/SPARK.md` first: it says what the first holder did, what it left

@@ -15,9 +15,10 @@ re-checks every object it receives and refuses a peer that sends anything
 that does not hash to its name (`Corrupt`), before anything is merged.
 
 Sync is **pull**. `pull(store, peer)` asks the peer for its heads, walks
-each head's manifest DAG down to manifests the store already has (one
-batched request per depth), fetches the bodies those manifests bind that
-the store lacks (one batched request), imports parents before children, and
+the heads' manifest DAGs down to manifests the store already has (one
+batched request per depth, all scopes together), fetches the bodies those
+manifests bind that the store lacks (one batched request), imports parents
+before children, and
 brings each head in with `replica.merge_head`, the rule `attach` uses for a
 git-merged directory. Nothing is pushed into a store; which heads it takes
 stays local.
@@ -331,61 +332,63 @@ def pull(store: Store, peer: Peer, *, scopes: Optional[Iterable[str]] = None, au
     """Bring `store` up to date with `peer` for every scope the peer has
     (or only `scopes`). Raises `Corrupt` if the peer sends an object that
     does not hash to its name, before anything is merged; anything the
-    peer cannot serve yet becomes a `retry` instead of an import."""
+    peer cannot serve yet becomes a `retry` instead of an import.
+
+    Every request is a round trip, so the walk is batched across scopes:
+    one request for the heads, one per DAG depth for the manifests of all
+    scopes together, and one for all the bodies."""
     report = PullReport()
     r0, b0 = peer.requests, peer.bytes
     wanted = None if scopes is None else set(scopes)
-    remote = peer.heads()
-    for scope in sorted(remote):
-        if wanted is not None and scope not in wanted:
-            continue
-        candidates = remote[scope]
+    remote = {s: hs for s, hs in peer.heads().items() if wanted is None or s in wanted}
+    for scope in remote:
         genesis = _genesis(scope)
         if store.manifest(genesis.content_hash()) is None:
             store.import_manifest(genesis)
 
-        # 1. The manifests we lack, down to the first ones we have: one request per depth.
-        fetched: Dict[str, Manifest] = {}
-        unserved: Set[str] = set()
-        frontier = [h for h in candidates if store.manifest(h) is None]
-        while frontier:
-            got, _, _ = peer.fetch(manifests=frontier)
-            nxt: List[str] = []
-            for h in frontier:
-                m = got.get(h)
-                if m is None:
-                    unserved.add(h)
-                    continue
-                fetched[h] = m
-                for p in (m.parent, m.merge_parent):
-                    if p and store.manifest(p) is None and p not in fetched and p not in unserved and p not in nxt:
-                        nxt.append(p)
-            frontier = nxt
+    # 1. The manifests we lack, down to the first ones we have: one request per depth.
+    fetched: Dict[str, Manifest] = {}
+    unserved: Set[str] = set()
+    frontier = sorted({h for hs in remote.values() for h in hs if store.manifest(h) is None})
+    while frontier:
+        got, _, _ = peer.fetch(manifests=frontier)
+        nxt: Set[str] = set()
+        for h in frontier:
+            m = got.get(h)
+            if m is None:
+                unserved.add(h)
+                continue
+            fetched[h] = m
+            for p in (m.parent, m.merge_parent):
+                if p and store.manifest(p) is None and p not in fetched and p not in unserved:
+                    nxt.add(p)
+        frontier = sorted(nxt)
 
-        # 2. The bodies those manifests bind that we lack: one request.
-        want = sorted({b for m in fetched.values() for _, b in m.entries() if not store.has_body(b)})
-        absent: Set[str] = set()
-        if want:
-            _, bodies, pruned = peer.fetch(bodies=want)
-            for h in want:
-                node = bodies.get(h)
-                if node is not None:
-                    store.import_body(node)
-                    report.bodies += 1
-                elif h not in pruned:
-                    absent.add(h)  # not written there yet: the manifests binding it wait
+    # 2. The bodies those manifests bind that we lack: one request.
+    want = sorted({b for m in fetched.values() for _, b in m.entries() if not store.has_body(b)})
+    absent: Set[str] = set()
+    if want:
+        _, bodies, pruned = peer.fetch(bodies=want)
+        for h in want:
+            node = bodies.get(h)
+            if node is not None:
+                store.import_body(node)
+                report.bodies += 1
+            elif h not in pruned:
+                absent.add(h)  # not written there yet: the manifests binding it wait
 
-        # 3. Parents before children; a manifest waits if a parent or a body is not here.
-        for h in _parents_first(fetched):
-            m = fetched[h]
-            parents_here = all(p is None or store.manifest(p) is not None for p in (m.parent, m.merge_parent))
-            bodies_here = not any(b in absent for _, b in m.entries())
-            if parents_here and bodies_here:
-                store.import_manifest(m)
-                report.manifests += 1
+    # 3. Parents before children; a manifest waits if a parent or a body is not here.
+    for h in _parents_first(fetched):
+        m = fetched[h]
+        parents_here = all(p is None or store.manifest(p) is not None for p in (m.parent, m.merge_parent))
+        bodies_here = not any(b in absent for _, b in m.entries())
+        if parents_here and bodies_here:
+            store.import_manifest(m)
+            report.manifests += 1
 
-        # 4. Head acceptance is local: merge each candidate we now hold.
-        for h in candidates:
+    # 4. Head acceptance is local: merge each candidate we now hold.
+    for scope in sorted(remote):
+        for h in remote[scope]:
             m = store.manifest(h)
             if m is None:
                 report.retry.setdefault(scope, []).append(h)

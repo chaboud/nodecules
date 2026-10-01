@@ -264,3 +264,20 @@ def test_both_ends_send_small_writes_at_once(tmp_path, servers):
     peer.heads()
     assert peer._conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
     assert _Handler.disable_nagle_algorithm is True
+
+
+def test_a_cold_pull_costs_requests_by_depth_not_by_scope(tmp_path, servers):
+    """Every request is a round trip, and between the Air and the Spark a
+    round trip is ~19 ms: a pull that walked each scope on its own made 1,052
+    requests for 50 scopes. Frontiers of all scopes go in one request per
+    depth, and all bodies in one more."""
+    a = Store()
+    a.attach(DiskBacking(tmp_path / "a"))
+    for k in range(12):
+        for c in range(3):
+            _put(a, f"n{c}", {"scope": k, "c": c}, scope=f"many/{k:02d}")
+    b = Store()
+    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
+    assert report.manifests == 36 and report.retry == {}
+    assert report.requests == 1 + 3 + 1  # heads, three depths, bodies
+    assert all(b.current(f"many/{k:02d}").content_hash() == a.current(f"many/{k:02d}").content_hash() for k in range(12))

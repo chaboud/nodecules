@@ -247,3 +247,20 @@ def test_a_store_attached_before_its_first_commit_pulls_whole(tmp_path, servers)
     report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
     assert report.retry == {} and b.current(M).content_hash() == a.current(M).content_hash()
     assert [m.seq for m in b.history(M)] == [2, 1, 0]
+
+
+def test_both_ends_send_small_writes_at_once(tmp_path, servers):
+    """A response is two small writes (headers, then body). With Nagle's
+    algorithm on, the second waits for an ACK the client delays: measured at
+    about 40 ms per batched request between the Air and the Spark, which
+    made a 1,000-manifest pull take 55 s. The server turns it off; the
+    client's http.client already does."""
+    import socket
+
+    from nodecules.core.transport import _Handler
+
+    _source(tmp_path)
+    peer = Peer(servers(DiskBacking(tmp_path / "a")).url)
+    peer.heads()
+    assert peer._conn.sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0
+    assert _Handler.disable_nagle_algorithm is True

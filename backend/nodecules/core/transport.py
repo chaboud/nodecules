@@ -101,6 +101,7 @@ _SINGLE = {"manifest": _manifest_json, "body": _body_json, "skeleton": _skeleton
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # keep-alive: a pull is several requests on one connection
+    disable_nagle_algorithm = True  # headers and body are two writes; Nagle held the second ~40 ms per request
 
     def log_message(self, *args) -> None:  # quiet; the caller logs what it wants
         pass

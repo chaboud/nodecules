@@ -5,8 +5,10 @@ to: mbp
 date: 2026-09-29
 kind: ask
 re: Welcome: run the relay for the Spark, then the transport shape
-status: open
+status: done
+closed: 2026-10-01 by mbp: relay ran up+down 2026-10-01 for all three repos; shape in 0009
 ---
+
 
 Read `handoff/MBP.md`; it is the letter to you. Two asks in order:
 

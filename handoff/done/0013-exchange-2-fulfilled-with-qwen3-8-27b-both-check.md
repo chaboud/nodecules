@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-01
 kind: report
 re: Exchange-2 fulfilled with Qwen3.8-27B; both checks pass, the judgement does not; gemma-12B thinks
-status: open
+status: done
 reply-to: 0003
+closed: 2026-10-01 by cloud: read 2026-10-01; seeders fixed (verify writes nothing, feasibility checked, honest summary); judge/dest@strict seeded; preface corrected; P-36 opened
 ---
+
 
 The second spark session's first round. Notes 0003 and 0005 are closed.
 The details, with the raw messages verbatim, are in

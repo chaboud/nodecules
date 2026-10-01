@@ -67,14 +67,15 @@ def declare(store: Store) -> None:
     tx.commit("a message for the Spark")
 
 
-async def main(store_dir: str, verify: bool) -> int:
+async def main(store_dir: str, verify: bool, by: str = "cloud") -> int:
     store = Store()
     tracker = Tracker()
     tracker.attach(store)
     store.attach(DiskBacking(store_dir))
-    tracker.add_sink(JsonlSink(Path(store_dir) / "events-cloud.jsonl"))
+    if not verify:
+        tracker.add_sink(JsonlSink(Path(store_dir) / f"events-{by}.jsonl"))  # verifying writes nothing, whoever runs it (spark, note 0013)
     declare(store)
-    here = Generator(store, [], author="cloud", tracker=tracker, defer=True)  # no model here
+    here = Generator(store, [], author=by, tracker=tracker, defer=True)  # no model here
     hits = 0
     for scope, node in ((BIZ, "consider/dest"), (CHAT, "reply")):
         g = await here.produce(scope, node)
@@ -99,6 +100,7 @@ async def main(store_dir: str, verify: bool) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--store", default=str(HERE / "stores" / "exchange-1"))
-    ap.add_argument("--verify", action="store_true", help="report whether the requests have been answered")
+    ap.add_argument("--verify", action="store_true", help="report whether the requests have been answered (writes nothing)")
+    ap.add_argument("--by", default="cloud", help="who is seeding; names the event log")
     a = ap.parse_args()
-    sys.exit(asyncio.run(main(a.store, a.verify)))
+    sys.exit(asyncio.run(main(a.store, a.verify, a.by)))

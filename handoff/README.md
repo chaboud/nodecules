@@ -20,6 +20,12 @@ channel: if it is not committed and pushed, the other side does not know
 it. This keeps the founder in the loop for free and makes every exchange
 replayable.
 
+The map and the traffic (founder, 2026-10-01): the notes below are the
+traffic; the vault's `LLM_Wiki/state-of-play.md` is the map of what we
+are trying to do, where we are, and where we are going, for every seat.
+Read it at the start of a round; keep your own line on it true. The
+Spark receives the vault by the relay until it has a key.
+
 Two channels ride on it:
 
 1. **Notes** in `inbox/<recipient>/`. Markdown, one file per note, for
@@ -132,7 +138,8 @@ the cloud fulfils on its next turn.
 
 | file or directory | owner | the other side |
 |---|---|---|
-| `STATUS.md`, `REFERENCE-MODEL.md`, `WHY-WHAT-HOW.md`, `CLAUDE.md`, the vault | cloud | proposes edits in a note, with the exact text |
+| `STATUS.md`, `REFERENCE-MODEL.md`, `WHY-WHAT-HOW.md`, `CLAUDE.md` | cloud | proposes edits in a note, with the exact text |
+| the vault (`ChaboudPrivateWiki`, the operating model: founder, 2026-10-01) | cloud anneals it and keeps the ADRs and directives | every seat edits its own row in `LLM_Wiki/state-of-play.md`'s working split and its own line in the queue, appends to `LLM_Wiki/log.md`, adds result pages that cite a `handoff/results/` file, and resolves an open question with a measurement; pull before you write, and keep to your own sections |
 | `backend/nodecules/core/*` | cloud, for the substrate's shape | Spark adds modules and fixes bugs it can reproduce, with tests, and says so in a report note; changes to an existing module's contract go through a note first |
 | `handoff/results/*`, `handoff/inbox/cloud/*`, `handoff/stores/*` (answers) | spark | reads |
 | `handoff/inbox/spark/*`, `handoff/inbox/mbp/*`, `handoff/stores/*` (requests) | cloud | reads |

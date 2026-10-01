@@ -11,3 +11,24 @@
 {"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "decisions/dest", "scope": "trip/plan", "seq": 10}
 {"at": null, "detail": {"activated": null, "author": "cloud", "manifest": "28748968cc82d24ce466dd23a49d9121dc330791f14886eb6cdccd609ca5b39c", "merge_parent": null, "note": "request judge/dest", "parent": "99d0c335f368e1e19a7681a2cc1d0dd1268b3cbc2ff3cd51bd24baf5f427273c", "seq": 2}, "kind": "commit", "node": null, "scope": "trip/plan", "seq": 11}
 {"at": null, "detail": {"cache_key": "7d81a6197e65957e5a38693da5f4e6587e593dc47da3b9374b8bfad3d08b4637", "outcome": "pending", "realization": "llm.spark@1"}, "kind": "produce.pending", "node": "judge/dest", "scope": "trip/plan", "seq": 12}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/tools", "scope": "lib", "seq": 0}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "strips/messages", "scope": "chat/tools", "seq": 1}
+{"at": null, "detail": {"cache_key": "ac5a18b9cbd5ac1e13aa1239a191a1726799b792059be16b2631b502dc20bda0", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cache-hit", "node": "reply", "scope": "chat/tools", "seq": 2}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/judge", "scope": "lib", "seq": 3}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "constraints/alice", "scope": "trip/plan", "seq": 4}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "decisions/dest", "scope": "trip/plan", "seq": 5}
+{"at": null, "detail": {"cache_key": "7d81a6197e65957e5a38693da5f4e6587e593dc47da3b9374b8bfad3d08b4637", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cache-hit", "node": "judge/dest", "scope": "trip/plan", "seq": 6}
+{"at": null, "detail": {"activated": null, "author": "cloud", "manifest": "8f73c4b5cd09d7a0d114e96afe01cc49587da212c0657e990b81410905d77ab9", "merge_parent": null, "note": "a judge recipe with eligibility stated and a schema enforced", "parent": "1f3cb2222f339531184a9391f7969fbdd0554755caad670342dc5230f7b80d98", "seq": 2}, "kind": "commit", "node": null, "scope": "lib", "seq": 0}
+{"at": null, "detail": {"activated": null, "author": "cloud", "manifest": "42b56d08c7fd133d215e611a4a318fe287d77e825d2a2610f120b0229b59f3bd", "merge_parent": null, "note": "the same judgement, hard limits as eligibility", "parent": "996f5a165cf51c9b9cad73a5783b6a431da9d15287a9300d3182c9166e4dede1", "seq": 4}, "kind": "commit", "node": null, "scope": "trip/plan", "seq": 1}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/tools", "scope": "lib", "seq": 2}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "strips/messages", "scope": "chat/tools", "seq": 3}
+{"at": null, "detail": {"cache_key": "ac5a18b9cbd5ac1e13aa1239a191a1726799b792059be16b2631b502dc20bda0", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cache-hit", "node": "reply", "scope": "chat/tools", "seq": 4}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/judge", "scope": "lib", "seq": 5}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "constraints/alice", "scope": "trip/plan", "seq": 6}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "decisions/dest", "scope": "trip/plan", "seq": 7}
+{"at": null, "detail": {"cache_key": "7d81a6197e65957e5a38693da5f4e6587e593dc47da3b9374b8bfad3d08b4637", "outcome": "exact", "realization": "llm.spark@1", "reproducibility": "equivalent"}, "kind": "produce.cache-hit", "node": "judge/dest", "scope": "trip/plan", "seq": 8}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "recipes/judge-strict", "scope": "lib", "seq": 9}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "constraints/alice", "scope": "trip/plan", "seq": 10}
+{"at": null, "detail": {"outcome": "exact"}, "kind": "produce.cache-hit", "node": "decisions/dest", "scope": "trip/plan", "seq": 11}
+{"at": null, "detail": {"activated": null, "author": "cloud", "manifest": "77fd1658d35431931402643099b59b6547604bb1df71da693c9e302f39a0b07d", "merge_parent": null, "note": "request judge/dest@strict", "parent": "42b56d08c7fd133d215e611a4a318fe287d77e825d2a2610f120b0229b59f3bd", "seq": 5}, "kind": "commit", "node": null, "scope": "trip/plan", "seq": 12}
+{"at": null, "detail": {"cache_key": "1f9d69e6dcf372a99a2583f5e8e3622ccfcebd9b304b0f3027451811865005bd", "outcome": "pending", "realization": "llm.spark@1"}, "kind": "produce.pending", "node": "judge/dest@strict", "scope": "trip/plan", "seq": 13}

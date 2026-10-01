@@ -14,12 +14,23 @@ carried only a name, days, and a price). This store asks for both:
                          traveller's constraints, ranked top three with a
                          reason each, as JSON
 
-Produced here with no model, so each becomes a request for
-`llm.spark@1`. `--verify` reports whether both came back as cache hits,
-whether the tool call's arguments parsed as an object, and whether the
-ranking is JSON with three ids from the decision.
+  trip/plan:judge/dest@strict  the same judgement with the hard limits
+                         stated as eligibility and a response_schema on
+                         the recipe (the Spark's suggestions in note
+                         0013, after both models ranked an ineligible
+                         option and one wrapped its JSON in a fence)
 
-    cd backend && PYTHONPATH=. python3 ../handoff/seed_exchange_2.py [--store DIR] [--verify]
+Produced here with no model, so each becomes a request for
+`llm.spark@1`. `--verify` reports, per step, whether it came back as a
+cache hit and whether its check passed: the tool call's arguments parsed
+as an object; the ranking is JSON, three known ids, and every id is
+eligible under the hard limits (computed from the facts, not assumed).
+The last line says how many steps answered and how many checks passed;
+the exit code is 0 only when all did (1: a step is unanswered; 2: a
+check failed). Verifying writes nothing: no event sink is attached, so a
+party other than cloud can run it without appending to cloud's log.
+
+    cd backend && PYTHONPATH=. python3 ../handoff/seed_exchange_2.py [--store DIR] [--verify] [--by cloud]
 """
 
 from __future__ import annotations
@@ -27,8 +38,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
+from typing import Tuple
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "backend"))
@@ -73,16 +86,46 @@ TOOLS = [
 QUESTION = "What will the weather be in Porto over the next five days? Use the weather tool; do not guess."
 
 
+JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {"ranked": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "properties": {"id": {"type": "string"}, "why": {"type": "string"}}, "required": ["id", "why"]}}},
+    "required": ["ranked"],
+}
+STRICT_SYSTEM = (
+    "You are helping a traveller choose. The constraints budget, max_days, and max_flight_h are hard limits: "
+    "an option whose price exceeds budget, whose days exceed max_days, or whose flight_h exceeds max_flight_h is not eligible "
+    "and must not appear in the ranking, whatever its other merits. The wants and avoids are soft and only order the eligible options. "
+    "Rank the three best eligible options with one line of reasoning each."
+)
+
+
+def eligible_ids() -> set:
+    """The ids the hard limits leave, computed from the facts."""
+    return {o.id for o in DEC.options if o.facts["price"] <= CONSTRAINTS["budget"] and o.facts["days"] <= CONSTRAINTS["max_days"] and o.facts["flight_h"] <= CONSTRAINTS["max_flight_h"]}
+
+
 def declare(store: Store) -> None:
-    if "recipes/tools" in set(store.current(LIB).ids()):
+    have = set(store.current(LIB).ids())
+    if "recipes/judge-strict" not in have:
+        tx = store.transaction(LIB, author="cloud")
+        tx.put(Node(id="recipes/judge-strict", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": HANDLE, "params": {"system": STRICT_SYSTEM, "response_schema": JUDGE_SCHEMA, "max_tokens": 800}}))
+        tx.commit("a judge recipe with eligibility stated and a schema enforced")
+        tx = store.transaction(BIZ, author="cloud")
+        if "decisions/dest" not in set(store.current(BIZ).ids()):
+            tx.put(Node(id="decisions/dest", kind="decision", scope=BIZ, data=DEC.model_dump(mode="json")))
+            tx.put(Node(id="constraints/alice", kind="constraints", scope=BIZ, data=CONSTRAINTS))
+        tx.put(Node(id="judge/dest@strict", kind="llm.consideration", scope=BIZ, edges=(Edge(target="decisions/dest", role="decision"), Edge(target="constraints/alice", role="constraints"), Edge(target="recipes/judge-strict", scope=LIB, role=RECIPE_ROLE))))
+        tx.commit("the same judgement, hard limits as eligibility")
+    if "recipes/tools" in have:
         return
     tx = store.transaction(LIB, author="cloud")
     tx.put(Node(id="recipes/tools", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": HANDLE, "params": {"system": "You are an assistant with tools. When a tool answers the question, call it instead of answering from memory.", "tools": TOOLS, "max_tokens": 400}}))
     tx.put(Node(id="recipes/judge", kind=RECIPE_TEMPLATE_KIND, scope=LIB, data={"realization": HANDLE, "params": {"system": "You are helping a traveller choose. Use the decision's option facts and the traveller's constraints. Rank the best three options and give one line of reasoning each. Answer as JSON only: {\"ranked\": [{\"id\": ..., \"why\": ...}, ...]}.", "max_tokens": 800}}))
     tx.commit("recipes for round two")
     tx = store.transaction(BIZ, author="cloud")
-    tx.put(Node(id="decisions/dest", kind="decision", scope=BIZ, data=DEC.model_dump(mode="json")))
-    tx.put(Node(id="constraints/alice", kind="constraints", scope=BIZ, data=CONSTRAINTS))
+    if "decisions/dest" not in set(store.current(BIZ).ids()):
+        tx.put(Node(id="decisions/dest", kind="decision", scope=BIZ, data=DEC.model_dump(mode="json")))
+        tx.put(Node(id="constraints/alice", kind="constraints", scope=BIZ, data=CONSTRAINTS))
     tx.put(Node(id="judge/dest", kind="llm.consideration", scope=BIZ, edges=(Edge(target="decisions/dest", role="decision"), Edge(target="constraints/alice", role="constraints"), Edge(target="recipes/judge", scope=LIB, role=RECIPE_ROLE))))
     tx.commit("a decision with facts, and constraints to judge it by")
     strip_append(store, CHAT, "strips/messages", {"role": "user", "content": QUESTION}, author="cloud")
@@ -91,54 +134,71 @@ def declare(store: Store) -> None:
     tx.commit("a question that wants a tool call")
 
 
-def _check_tools(data: dict) -> str:
+def _check_tools(data: dict) -> Tuple[bool, str]:
     calls = data.get("tool_calls") or []
     if not calls:
-        return f"no tool call (stop_reason={data.get('stop_reason')}); content: {str(data.get('content'))[:120]!r}"
+        return False, f"no tool call (stop_reason={data.get('stop_reason')}); content: {str(data.get('content'))[:120]!r}"
     c = calls[0]
     args = c.get("arguments")
-    ok = isinstance(args, dict) and "_raw" not in args and c.get("name") in {t["name"] for t in TOOLS}
-    return f"tool call {c.get('name')} arguments={args!r} · parsed as an object: {'yes' if ok else 'NO'}"
+    ok = isinstance(args, dict) and "_raw" not in args and c.get("name") in {t["name"] for t in TOOLS} and "city" in args
+    return ok, f"tool call {c.get('name')} arguments={args!r} · parsed as an object with a city: {'yes' if ok else 'NO'}"
 
 
-def _check_ranking(data: dict) -> str:
+def _check_ranking(data: dict) -> Tuple[bool, str]:
     content = data.get("content") or ""
+    fenced = content.strip().startswith("```")
+    body = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", content.strip()) if fenced else content
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(body)
     except json.JSONDecodeError:
-        return f"not JSON: {content[:120]!r}"
+        return False, f"not JSON{' (in a ``` fence, still not JSON)' if fenced else ''}: {content[:120]!r}"
     ranked = parsed.get("ranked") if isinstance(parsed, dict) else None
     ids = {o.id for o in DEC.options}
     if not isinstance(ranked, list) or len(ranked) != 3 or not all(isinstance(r, dict) and r.get("id") in ids for r in ranked):
-        return f"JSON but not three known ids: {content[:160]!r}"
+        return False, f"JSON but not three known ids: {content[:160]!r}"
     labels = {o.id: o.label for o in DEC.options}
-    return "ranked: " + "; ".join(f"{labels[r['id']]} ({str(r.get('why'))[:60]})" for r in ranked)
+    eligible = eligible_ids()
+    bad = [r["id"] for r in ranked if r["id"] not in eligible]
+    text = "ranked: " + "; ".join(f"{labels[r['id']]} ({str(r.get('why'))[:60]})" for r in ranked)
+    if fenced:
+        text += " · JSON arrived in a ``` fence (the recipe said JSON only)"
+    if bad:
+        return False, text + f" · NOT eligible: {', '.join(labels[b] for b in bad)}; the hard limits leave {sorted(eligible)}"
+    return not fenced, text + f" · all three eligible ({sorted(eligible)})"
 
 
-async def main(store_dir: str, verify: bool) -> int:
+STEPS = ((CHAT, "reply", _check_tools), (BIZ, "judge/dest", _check_ranking), (BIZ, "judge/dest@strict", _check_ranking))
+
+
+async def main(store_dir: str, verify: bool, by: str) -> int:
     store = Store()
     tracker = Tracker()
     tracker.attach(store)
     store.attach(DiskBacking(store_dir))
-    tracker.add_sink(JsonlSink(Path(store_dir) / "events-cloud.jsonl"))
+    if not verify:
+        tracker.add_sink(JsonlSink(Path(store_dir) / f"events-{by}.jsonl"))  # verifying writes nothing, whoever runs it
     declare(store)
-    here = Generator(store, [], author="cloud", tracker=tracker, defer=True)
-    hits = 0
-    for scope, node, check in ((CHAT, "reply", _check_tools), (BIZ, "judge/dest", _check_ranking)):
+    here = Generator(store, [], author=by, tracker=tracker, defer=True)
+    hits, passed, failed = 0, 0, []
+    for scope, node, check in STEPS:
         g = await here.produce(scope, node)
         line = f"{scope}:{node}: {g.outcome}" + (" (cache hit)" if g.cache_hit else "") + (f" · {g.note}" if g.note else "")
         if g.cache_hit:
             hits += 1
-            line += "\n    " + check(g.node.data if isinstance(g.node.data, dict) else {})
+            ok, text = check(g.node.data if isinstance(g.node.data, dict) else {})
+            passed += ok
+            if not ok:
+                failed.append(node)
+            line += "\n    " + ("PASS " if ok else "FAIL ") + text
         print(line)
     pending = [r for s in store.scopes() for r in requests(store, s)]
     print(f"{len(pending)} pending request(s) in {store_dir}:")
     for r in pending:
         print(f"  {r['request']} wants {r['realization']} · inputs {list(r['inputs'])}")
     if verify:
-        ok = hits == 2
-        print("verify:", "both steps are cache hits; read the two checks above" if ok else f"{hits} of 2 steps answered")
-        return 0 if ok else 1
+        n = len(STEPS)
+        print(f"verify: {hits} of {n} answered; checks: {passed} of {hits} passed" + (f"; failed: {', '.join(failed)}" if failed else ""))
+        return 0 if (hits == n and passed == hits) else (1 if hits < n else 2)
     return 0
 
 
@@ -146,5 +206,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--store", default=str(HERE / "stores" / "exchange-2"))
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--by", default="cloud", help="who is seeding; names the event log (not written when verifying)")
     a = ap.parse_args()
-    sys.exit(asyncio.run(main(a.store, a.verify)))
+    sys.exit(asyncio.run(main(a.store, a.verify, a.by)))

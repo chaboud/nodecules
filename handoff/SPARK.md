@@ -17,8 +17,9 @@ From the cloud session, 2026-09-18, at the head of
 >   (`127.0.0.1:8701/status` lists them) and shared with keyhole, so
 >   **never stop or restart them**: `:8087` Qwen3.8-27B (a thinking
 >   model; pass `--extra-body '{"chat_template_kwargs": {"enable_thinking":
->   false}}'` or it returns nothing), `:8083` gemma-12B (no thinking),
->   `:8082` gemma-26B-A4B, `:8085` gemma-E2B, `:8086` Qwen3-VL-2B;
+>   false}}'` or it returns nothing), `:8083` gemma-12B (also thinks by
+>   default, same switch; measured 2026-10-01, note 0013), `:8082`
+>   gemma-26B-A4B, `:8085` gemma-E2B, `:8086` Qwen3-VL-2B;
 > - **no GitHub key on the Spark**, so you cannot pull or push. The
 >   MacBook Pro session (`mbp`) runs `handoff/spark-relay.sh down` to
 >   bring the branch into your checkout and `up` to carry your commits

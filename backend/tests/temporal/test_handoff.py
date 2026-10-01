@@ -90,23 +90,53 @@ def test_notes_round_trip(tmp_path: Path):
     assert run(note, "--root", str(root), "show", "0001").stdout.startswith("---\nid: 0001")
 
 
-def test_the_second_exchange_asks_for_a_tool_call_and_a_judgement(tmp_path: Path):
+def test_the_second_exchange_asks_for_a_tool_call_and_two_judgements(tmp_path: Path):
     """exchange-2 exists because the first round could not exercise tool-call
-    parsing or a consideration with facts to judge. With the stand-in
-    model neither check can pass, and --verify says so without failing:
-    both steps are cache hits, and the checks report what came back."""
+    parsing or a consideration with facts to judge; its third request states
+    the hard limits as eligibility with a schema, after two real models
+    ranked an ineligible option (spark, note 0013). With the stand-in model
+    no check can pass, and --verify says so: every step answered, zero
+    checks passed, exit code 2. Verifying writes nothing to any event log."""
     store = tmp_path / "exchange-2"
     seeded = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store))
     assert seeded.returncode == 0, seeded.stderr
-    assert "2 pending request(s)" in seeded.stdout and "requests/judge/dest" in seeded.stdout and "'trip/plan:constraints/alice'" in seeded.stdout
+    assert "3 pending request(s)" in seeded.stdout and "requests/judge/dest@strict" in seeded.stdout and "'trip/plan:constraints/alice'" in seeded.stdout
+    before = (store / "events-cloud.jsonl").read_text()
+    unanswered = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store), "--verify")
+    assert unanswered.returncode == 1 and "verify: 0 of 3 answered" in unanswered.stdout
+    assert (store / "events-cloud.jsonl").read_text() == before  # a verify from any party appends nothing
+
     done = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark")
     assert done.returncode == 0, done.stderr
-    assert "2 request(s) fulfilled" in done.stdout
+    assert "3 request(s) fulfilled" in done.stdout
     verified = run(str(HANDOFF / "seed_exchange_2.py"), "--store", str(store), "--verify")
-    assert verified.returncode == 0, verified.stdout + verified.stderr
-    assert "both steps are cache hits" in verified.stdout
-    assert "no tool call (stop_reason=end_turn)" in verified.stdout and "not JSON:" in verified.stdout
+    assert verified.returncode == 2, verified.stdout + verified.stderr
+    assert "verify: 3 of 3 answered; checks: 0 of 3 passed; failed: reply, judge/dest, judge/dest@strict" in verified.stdout
+    assert "FAIL no tool call (stop_reason=end_turn)" in verified.stdout and "FAIL not JSON:" in verified.stdout
+    assert (store / "events-cloud.jsonl").read_text() == before
     reloaded = load(store)
     assert all(requests(reloaded, s) == [] for s in reloaded.scopes())
     sent = reloaded.get(reloaded.current("trip/plan"), "judge/dest").data["content"]
     assert "## constraints" in sent and "## decision" in sent  # the echo repeats what the model was shown: both roles rendered
+
+
+def test_the_judgement_check_knows_the_hard_limits():
+    """The check that passed a wrong answer (note 0013) now computes
+    eligibility from the facts: three destinations survive the limits, and
+    a ranking that names any other fails even when it is valid JSON."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("seed2", HANDOFF / "seed_exchange_2.py")
+    seed2 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(seed2)
+    assert seed2.eligible_ids() == {"o0", "o2", "o5"}  # Lisbon, Oaxaca, Reykjavik
+    ok, text = seed2._check_ranking({"content": json.dumps({"ranked": [{"id": "o0", "why": "a"}, {"id": "o2", "why": "b"}, {"id": "o8", "why": "Naples, over budget"}]})})
+    assert not ok and "NOT eligible: Naples" in text
+    ok, text = seed2._check_ranking({"content": json.dumps({"ranked": [{"id": "o0", "why": "a"}, {"id": "o2", "why": "b"}, {"id": "o5", "why": "c"}]})})
+    assert ok and "all three eligible" in text
+    ok, text = seed2._check_ranking({"content": "```json\n" + json.dumps({"ranked": [{"id": "o0", "why": "a"}, {"id": "o2", "why": "b"}, {"id": "o5", "why": "c"}]}) + "\n```"})
+    assert not ok and "fence" in text  # gemma's shape: right answer, wrong envelope
+    ok, text = seed2._check_tools({"tool_calls": [{"name": "lookup_weather", "arguments": {"city": "Porto", "days": 5}}]})
+    assert ok
+    ok, text = seed2._check_tools({"tool_calls": [{"name": "lookup_weather", "arguments": {"_raw": "{broken"}}]})
+    assert not ok

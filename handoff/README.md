@@ -6,8 +6,8 @@ Three parties work on this branch from different machines:
 |---|---|---|---|
 | **cloud** | a container at claude.ai, fresh clone per session, no GPU, no model | the design queue, the vault, the spec | `cloud` |
 | **spark** | a Claude Code instance living on the DGX Spark (from 2026-09-29; the first spark party was keyhole's agent working from the Air, signed off in note 0004), CUDA, models on the Spark's loopback shared with keyhole, persistent disk, **no GitHub key** | real models, real numbers, a machine that stays up | `spark` |
-| **mbp** | a Claude Code instance on the MacBook Pro (from 2026-09-29), nodecules only, keyed for GitHub, on the same LAN as the Spark | the Spark's git side through `spark-relay.sh`; the second real machine for anything that needs two | `mbp` |
-| **laptop** | the MacBook Air | stenota's real weights (`stenota/HARDWARE-TODO.md`); keyhole's agent lives here and is hands-off nodecules | `laptop` |
+| **mbp** | a seat, not a machine: a Claude Code session on the founder's MacBook Air (M4, from 2026-09-29; the letter was addressed to a Pro by mistake), nodecules only, keyed for GitHub, on the same LAN as the Spark, working in its own clones | the Spark's git side through `spark-relay.sh`; the replica transport; the second real machine for anything that needs two | `mbp` |
+| **laptop** | the stenota seat on the MacBook Air | stenota's real weights (`stenota/HARDWARE-TODO.md`); keyhole's agent is hands-off nodecules | `laptop` |
 
 The founder reads everything and decides. `SPARK.md` is the letter to the
 Spark session; this file is the protocol both sessions follow.
@@ -154,13 +154,17 @@ Nothing here runs on its own. Each side arranges its own cadence:
   the branch down to the Spark's checkout and its commits back up to
   GitHub, never force-pushing to origin. Run it on the keyed box;
   endpoints come from the environment. **From 2026-09-29 the keyed box
-  is the MacBook Pro** (`mbp`): it runs `up` and then `down`, in that
-  order, at the start and the end of its rounds, so the Spark's commits
-  are collected before its branch is replaced and its checkout is never
-  more than one mbp round stale. A deploy key on the Spark would retire the relay; that
-  is the founder's call.
-- **MBP**: also the natural home for anything that needs two real
-  machines on one LAN (the replica transport, `MBP.md`).
+  is the `mbp` seat's** (a MacBook Air): it runs `up` and then `down`,
+  in that order, at the start and the end of its rounds, so the Spark's
+  commits are collected before its branch is replaced and its checkout
+  is never more than one mbp round stale. nodecules is a public
+  repository, so the Spark can `git pull` it over HTTPS itself (mbp,
+  note 0008); `down` is for the private repos, stenota and the vault,
+  until a read-only deploy key exists there. That key is the founder's
+  call.
+- **mbp**: also the natural home for anything that needs two real
+  machines on one LAN (the replica transport, `MBP.md`; shape agreed in
+  note 0009).
 - **Cloud**: a daily Routine wakes the cloud session, which pulls, reads
   `inbox/cloud/`, acts, and pushes. Cloud sessions can also be poked by
   the founder at any time. The Routine's id and how to remove it are in

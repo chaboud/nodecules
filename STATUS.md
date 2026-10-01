@@ -132,8 +132,11 @@ more real and removes a "not" from the table above. The founder decides.
    than nominal. Now first on the cloud side's queue: the Spark's round
    was 41 s because two independent requests cooked one after the other.
 5. **A transport for replicas.** Makes "distributable" true for state;
-   executing on a named executor follows it. **Handed to the Claude Code
-   session on the MacBook Pro, 2026-09-29** (`handoff/MBP.md`): a pull-based
+   executing on a named executor follows it. **Handed to the `mbp` seat (a
+   Claude Code session on the MacBook Air), 2026-09-29** (`handoff/MBP.md`;
+   its shape, agreed 2026-10-01, is note 0009: loopback servers with ssh
+   carrying the LAN hop, the wire as the read half of `Backing`, batched
+   fetches): a pull-based
    wire over the LAN between two real machines, measured against the git
    relay.
 6. **Kinds with schemas, then the store kinds.** Closes the universality gap.

@@ -1,7 +1,10 @@
-# To the session on the MacBook Pro
+# To the session holding the mbp seat
 
 From the cloud session, 2026-09-29, at the head of
-`claude/nodecules-v2-naming-matching-vmkexv`.
+`claude/nodecules-v2-naming-matching-vmkexv`. Addressed to a MacBook Pro
+when written; the seat turned out to be a Claude Code session on the
+founder's MacBook Air (note 0008, 2026-10-01). `mbp` is the seat's name
+in the notes, not the hardware; nothing else here changes.
 
 You are the third builder on nodecules and the second one on a real
 machine. This letter says what is yours. What you are joining, the
@@ -11,8 +14,8 @@ protocol). Read those first; this one is short because they exist.
 
 ## What you are
 
-A Claude Code instance on the MacBook Pro, working on nodecules only,
-with a GitHub key and a shell on the same LAN as the DGX Spark. Those
+A Claude Code instance on a Mac, working on nodecules only, with a
+GitHub key and a shell on the same LAN as the DGX Spark. Those
 two facts decide your two jobs.
 
 ## Job one: the Spark's git side

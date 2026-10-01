@@ -141,3 +141,46 @@ ssh -N -L 17801:127.0.0.1:17801 spark-b23f &
 ssh spark-b23f 'cd ~/git/nodecules && PYTHONPATH=backend backend/.venv/bin/python handoff/transport.py serve --store handoff/stores/exchange-2 --port 17801 --until-stdin-closes'
 PYTHONPATH=backend python3 handoff/transport.py pull --store /tmp/ex2 --peer http://127.0.0.1:17801 --by mbp
 ```
+
+## Addendum, 13:05 PDT: the server-side walk (nodecules `0bfb12b`)
+
+This adds `POST /walk`: the server walks the manifest DAG from the heads
+and stops at what the puller says it has. It also includes cloud's
+`e4b01ab`, where `heads()` keeps an incremental lineage index instead of
+re-reading every manifest. Same harness and the same path; medians of 10
+(synthetic: 3).
+
+| case | median | min | max | n | manifests | bodies | requests | bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| one fulfilment, Spark → here (-L) | 47.8 | 44.4 | 65.4 | 10 | 1 | 3 | 3 | 5712 |
+| one fulfilment, here → Spark (-R) | 95.1 | 83.0 | 104.0 | 10 | 1 | 3 | 3 | 5694 |
+| no-op pull, Spark → here | 16.4 | 14.2 | 18.4 | 10 | 0 | 0 | 1 | 175 |
+| no-op pull, here → Spark | 18.3 | 15.2 | 21.0 | 10 | 0 | 0 | 1 | 175 |
+| cold pull of exchange-2, Spark → here | 69.0 | 53.5 | 80.7 | 10 | 12 | 18 | 3 | 26724 |
+| cold pull, synthetic wide | 3257.0 | 3101.2 | 3446.1 | 3 | 1001 | 5003 | 4 | 6344790 |
+| one fulfilment into synthetic wide | 136.1 | 75.8 | 190.5 | 3 | 1 | 3 | 3 | 16194 |
+| no-op pull, synthetic wide | 59.0 | 25.2 | 91.5 | 3 | 0 | 0 | 1 | 4061 |
+| cold pull, synthetic deep | 2601.9 | 2554.0 | 2740.3 | 3 | 501 | 503 | 3 | 10165774 |
+| one fulfilment into synthetic deep | 77.7 | 74.2 | 242.4 | 3 | 1 | 3 | 3 | 43466 |
+| no-op pull, synthetic deep | 20.7 | 17.7 | 49.1 | 3 | 0 | 0 | 1 | 92 |
+
+| case | before | after |
+|---|---:|---:|
+| cold pull, synthetic deep | 9.9 s, 503 requests | 2.6 s, 3 requests |
+| cold pull of exchange-2 | 108 ms, 7 requests | 69 ms, 3 requests |
+| cold pull, synthetic wide | 3.5 s, 23 requests | 3.3 s, 4 requests |
+
+- **Every cold pull is now 3 or 4 requests.** What remains is bytes and
+  work at the ends, not round trips: 10 MB of whole manifests for the
+  deep store (P-37), and 13,050 fsynced files plus manifest decoding for
+  the wide one.
+- **Cloud's lineage index brought the deep store's polling floor from
+  52.6 ms to 20.7 ms**, the small-store number, as cloud expected. The
+  wide store's floor (59 ms median, 25 to 92 ms across 3 runs) is noisy
+  at n = 3. It is listed, not explained.
+- **Exchange-2 shows 12 manifests and 18 bodies where it showed 11 and
+  16:** the Spark's round three landed in it between the two runs.
+- **A server from before `/walk` still syncs.** It answers the walk with
+  a 404 without reading the request body, so the client drops that
+  connection and walks per depth on a fresh one. The tests hold both,
+  using a server that behaves like the old one.

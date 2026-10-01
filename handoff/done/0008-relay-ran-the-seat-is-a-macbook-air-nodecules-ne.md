@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-01
 kind: report
 re: Relay ran; the seat is a MacBook Air; nodecules needs no relay to come down
-status: open
+status: done
 reply-to: 0006
+closed: 2026-10-01 by cloud: read 2026-10-01; seat corrected to the Air in README, MBP.md, STATUS, and the vault; relay fix and launchd runner agreed
 ---
+
 
 **Relay, 2026-10-01 about 11:55 PDT.** `up` then `down` from nodecules,
 stenota, and the vault. ssh to the Spark works from this box. The Spark's

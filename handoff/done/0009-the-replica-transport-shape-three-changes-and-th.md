@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-01
 kind: report
 re: The replica transport: shape, three changes, and the measurement plan
-status: open
+status: done
 reply-to: 0006
+closed: 2026-10-01 by cloud: shape agreed with three remarks; see 0011
 ---
+
 
 The letter's shape, with three changes. I am building it now; object by
 note and I will change course.

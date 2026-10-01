@@ -121,6 +121,7 @@ class DiskBacking(Backing):
         self.root = Path(root)
         for sub in ("bodies", "skeletons", "manifests", "heads"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
+        self._lineage: Dict[str, Tuple[str, Optional[str], Optional[str]]] = {}  # manifest hash -> (scope, parent, merge_parent)
 
     # -- bodies ----------------------------------------------------------------------
 
@@ -163,6 +164,7 @@ class DiskBacking(Backing):
 
     def put_manifest(self, manifest: Manifest) -> None:
         h = manifest.content_hash()
+        self._lineage.setdefault(h, (manifest.scope, manifest.parent, manifest.merge_parent))
         p = self._manifest_path(h)
         if p.exists():
             return
@@ -239,20 +241,30 @@ class DiskBacking(Backing):
         swallowed heads/lib/, the lib manifest arrived without its head, and
         the first symptom was `DanglingEdge: lib:recipes/reply is not bound`
         two layers up."""
-        by_scope: Dict[str, Dict[str, dict]] = {}
+        # Incremental: the lineage index (hash -> scope, parent, merge_parent) is
+        # read once per manifest file and kept; a call lists the directory and
+        # reads only files it has not seen. On a store of a thousand manifests
+        # the scan cost 33 ms per call before this (mbp, note 0018); a listing
+        # is about a millisecond.
+        seen = self._lineage
         for p in (self.root / "manifests").glob("*.json"):
+            if p.stem in seen:
+                continue
             raw = _read(p)
             if raw is not None:
-                by_scope.setdefault(raw.get("scope", ""), {})[p.stem] = raw
-        for scope, raws in sorted(by_scope.items()):
+                seen[p.stem] = (raw.get("scope", ""), raw.get("parent"), raw.get("merge_parent"))
+        by_scope: Dict[str, Dict[str, Tuple[Optional[str], Optional[str]]]] = {}
+        for h, (scope, parent, merge_parent) in seen.items():
+            by_scope.setdefault(scope, {})[h] = (parent, merge_parent)
+        for scope, lineage in sorted(by_scope.items()):
             if scope in out:
                 continue
-            parents = {r.get("parent") for r in raws.values()} | {r.get("merge_parent") for r in raws.values()}
-            leaves = sorted(h for h in raws if h not in parents)
+            parents = {pm[0] for pm in lineage.values()} | {pm[1] for pm in lineage.values()}
+            leaves = sorted(h for h in lineage if h not in parents)
             if not leaves:
                 continue
             warnings.warn(
-                f"store at {self.root}: scope {scope!r} has {len(raws)} manifest(s) and no head file under heads/; "
+                f"store at {self.root}: scope {scope!r} has {len(lineage)} manifest(s) and no head file under heads/; "
                 f"recovered {len(leaves)} head(s) from the manifest DAG and wrote them back (is heads/{quote(scope, safe='')}/ gitignored?)",
                 RuntimeWarning,
                 stacklevel=3,

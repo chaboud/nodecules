@@ -552,6 +552,13 @@ class Store:
                     m = Manifest.build(scope, PMap(), seq=0, parent=None, note="genesis")
                     self._manifests[m.content_hash()] = m
                     self._current[scope] = m
+                    if self._backing is not None:
+                        # A store attached before this scope's first touch would otherwise
+                        # leave every chain on disk ending in a parent with no file; another
+                        # replica reading the directory then has nothing to walk down to
+                        # (mbp, note 0018). Genesis is the same hash in every store, so
+                        # writing it is idempotent across machines.
+                        self._backing.put_manifest(m)
         return m
 
     def snapshot(self, *scopes: str) -> Snapshot:

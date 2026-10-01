@@ -234,15 +234,18 @@ def test_single_objects_are_served_for_inspection(tmp_path, servers):
 
 
 def test_a_store_attached_before_its_first_commit_pulls_whole(tmp_path, servers):
-    """Attach first, commit after (how fulfil.py and seed_exchange.py work):
-    the scope's genesis manifest is minted in memory and never written, so
-    every chain on disk ends in a parent with no file. Genesis is the same
-    hash in every store, so the pull mints it locally instead of asking."""
+    """Attach first, commit after (how fulfil.py and seed_exchange.py work).
+    Until 2026-10-01 the scope's genesis manifest was minted in memory and
+    never written, so every chain on disk ended in a parent with no file;
+    Store.current now writes it through (cloud, answering note 0018).
+    Genesis is the same hash in every store, so the pull still mints it
+    locally instead of asking, which also serves directories written
+    before the fix."""
     a = Store()
     a.attach(DiskBacking(tmp_path / "a"))
     _graph(a)
     genesis = a.manifest(a.current(M).parent).parent
-    assert not (tmp_path / "a" / "manifests" / f"{genesis}.json").exists()
+    assert (tmp_path / "a" / "manifests" / f"{genesis}.json").exists()  # written through on first touch
     b = Store()
     report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
     assert report.retry == {} and b.current(M).content_hash() == a.current(M).content_hash()

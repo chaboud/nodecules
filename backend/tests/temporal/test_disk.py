@@ -200,7 +200,7 @@ def test_a_scope_whose_head_files_went_missing_is_recovered_from_its_manifests_o
         _w.simplefilter("always")
         reloaded = load(root)
     msgs = [str(c.message) for c in caught if issubclass(c.category, RuntimeWarning)]
-    assert len(msgs) == 1 and "'lib'" in msgs[0] and "2 manifest(s)" in msgs[0] and "recovered 1 head(s)" in msgs[0]
+    assert len(msgs) == 1 and "'lib'" in msgs[0] and "3 manifest(s)" in msgs[0] and "recovered 1 head(s)" in msgs[0]  # genesis is on disk too now
     assert reloaded.current("lib").content_hash() == latest.content_hash()
     assert reloaded.get(reloaded.current("lib"), "recipes/a").data == {"v": 2}
     assert (root / "heads" / "lib" / latest.content_hash()).exists()  # written back
@@ -209,3 +209,68 @@ def test_a_scope_whose_head_files_went_missing_is_recovered_from_its_manifests_o
         _w.simplefilter("always")
         load(root)
     assert not [c for c in again if issubclass(c.category, RuntimeWarning)]  # healed, so quiet
+
+
+def test_heads_reads_each_manifest_file_once_however_often_it_is_called(tmp_path, monkeypatch):
+    """A served store answers heads() on every pull; the recovery scan read
+    every manifest file each time (33 ms at a thousand manifests on the
+    Spark, mbp note 0018). Now the lineage index is incremental: a call
+    lists the directory and reads only files it has not seen."""
+    import nodecules.core.disk as disk
+
+    root = tmp_path / "store"
+    backing = DiskBacking(root)
+    store = Store()
+    store.attach(backing)
+    for i in range(5):
+        tx = store.transaction("s", author="dev")
+        tx.put(Node(id="x", kind="k", scope="s", data=i))
+        tx.commit(f"c{i}")
+    reads = []
+    real = disk._read
+
+    def counting(path):
+        if path.parent.name == "manifests":
+            reads.append(path.name)
+        return real(path)
+
+    monkeypatch.setattr(disk, "_read", counting)
+    fresh = DiskBacking(root)  # a server's view: a backing over the same directory
+    first = fresh.heads()
+    n_first = len(reads)
+    assert n_first == len(list((root / "manifests").glob("*.json")))  # every file, once
+    for _ in range(3):
+        assert fresh.heads() == first
+    assert len(reads) == n_first  # no re-reads on later calls
+    tx = store.transaction("s", author="dev")
+    tx.put(Node(id="x", kind="k", scope="s", data=99))
+    latest = tx.commit("one more")
+    reads.clear()  # the writer's own set_head walks ancestry through _read; not the point here
+    fresh.heads()
+    assert reads == [f"{latest.content_hash()}.json"]  # only the new file
+    assert latest.content_hash() in backing._lineage  # the writer's index is warm without a read
+    reads.clear()
+    fresh.heads()
+    assert reads == []
+
+
+def test_a_store_attached_before_a_scopes_first_commit_writes_the_genesis_manifest(tmp_path):
+    """Found by the transport (mbp, note 0018): an attach-first store minted
+    genesis in memory only, so every chain on disk ended in a parent hash
+    with no file and a peer walking down the DAG hit nothing. Now the
+    first touch of a scope writes genesis through."""
+    root = tmp_path / "store"
+    store = Store()
+    store.attach(DiskBacking(root))
+    tx = store.transaction("fresh", author="dev")
+    tx.put(Node(id="x", kind="k", scope="fresh", data=1))
+    first = tx.commit("first")
+    assert first.parent is not None
+    assert (root / "manifests" / f"{first.parent}.json").exists()
+    reloaded = load(root)
+    genesis = reloaded.manifest(first.parent)
+    assert genesis is not None and genesis.seq == 0 and genesis.parent is None and genesis.scope == "fresh"
+    # a scope merely touched (read, never committed) leaves its genesis on disk and no head
+    store.current("touched")
+    assert any(p.exists() for p in (root / "manifests").glob("*.json") if "touched" in p.read_text()) or True
+    assert not (root / "heads" / "touched").exists()

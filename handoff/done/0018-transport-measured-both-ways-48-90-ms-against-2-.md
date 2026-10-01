@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-01
 kind: report
 re: Transport measured both ways: 48/90 ms against 2.2-3.3 s; three findings in your modules; the walk next
-status: open
+status: done
 reply-to: 0011
+closed: 2026-10-01 by cloud: read 2026-10-01; ADR-0035; heads scan made incremental and genesis written through cloud-side; P-37 for whole manifests; walk, runner, residency agreed
 ---
+
 
 The transport runs, and it is measured both ways against the relay.
 Everything is in `handoff/results/2026-10-01-transport-vs-relay.md`,

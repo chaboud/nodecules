@@ -53,6 +53,62 @@ def _write_atomic(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+# -- the codec: one JSON shape per object, shared by the disk and the wire -------------
+
+
+def encode_body(node: Node) -> dict:
+    return node.model_dump(mode="json")
+
+
+def decode_body(raw: dict, expected_hash: str) -> Node:
+    node = Node(**raw)
+    if node.content_hash() != expected_hash:
+        raise Corrupt(f"body {expected_hash[:12]} does not hash to its name")
+    return node
+
+
+def encode_skeleton(kind: str, edges: Tuple[Edge, ...]) -> dict:
+    return {"kind": kind, "edges": [e.model_dump(mode="json") for e in edges]}
+
+
+def decode_skeleton(raw: dict) -> Tuple[str, Tuple[Edge, ...]]:
+    return raw["kind"], tuple(Edge(**e) for e in raw["edges"])
+
+
+def encode_manifest(manifest: Manifest) -> dict:
+    payload = manifest.model_dump(mode="json")
+    payload["entries"] = [[name, body] for name, body in manifest.entries()]
+    return payload
+
+
+def decode_manifest(raw: dict, expected_hash: Optional[str] = None) -> Manifest:
+    """A manifest from its JSON, refused as corrupt unless its entries
+    rebuild to the recorded root and (when a hash is expected) it hashes to
+    that name. Does not modify `raw`."""
+    raw = dict(raw)
+    entries = PMap.of({name: body for name, body in raw.pop("entries")})
+    stored_root = raw.pop("root")
+    if entries.root_hash != stored_root:
+        raise Corrupt(f"manifest {(expected_hash or '?')[:12]}: entries do not rebuild to the recorded root")
+    m = Manifest.build(
+        raw["scope"],
+        entries,
+        seq=raw["seq"],
+        parent=raw.get("parent"),
+        note=raw.get("note", ""),
+        author=raw.get("author", ""),
+        rebased_from=raw.get("rebased_from"),
+        merge_parent=raw.get("merge_parent"),
+        activated=raw.get("activated"),
+        resolution=raw.get("resolution", "single-authority"),
+        resolution_version=raw.get("resolution_version", 1),
+        overrode=tuple(tuple(o) for o in raw.get("overrode", [])),
+    )
+    if expected_hash is not None and m.content_hash() != expected_hash:
+        raise Corrupt(f"manifest {expected_hash[:12]} does not hash to its name")
+    return m
+
+
 def _read(path: Path) -> Optional[dict]:
     if not path.exists():
         return None
@@ -75,19 +131,16 @@ class DiskBacking(Backing):
         h = node.content_hash()
         p = self._body_path(h)
         if not p.exists():
-            _write_atomic(p, node.model_dump(mode="json"))
+            _write_atomic(p, encode_body(node))
         sk = self.root / "skeletons" / f"{h}.json"
         if not sk.exists():
-            _write_atomic(sk, {"kind": node.kind, "edges": [e.model_dump(mode="json") for e in node.edges]})
+            _write_atomic(sk, encode_skeleton(node.kind, node.edges))
 
     def get_body(self, content_hash: str) -> Optional[Node]:
         raw = _read(self._body_path(content_hash))
         if raw is None:
             return None
-        node = Node(**raw)
-        if node.content_hash() != content_hash:
-            raise Corrupt(f"body {content_hash[:12]} does not hash to its name")
-        return node
+        return decode_body(raw, content_hash)
 
     def has_body(self, content_hash: str) -> bool:
         return self._body_path(content_hash).exists()
@@ -101,7 +154,7 @@ class DiskBacking(Backing):
         raw = _read(self.root / "skeletons" / f"{content_hash}.json")
         if raw is None:
             return None
-        return raw["kind"], tuple(Edge(**e) for e in raw["edges"])
+        return decode_skeleton(raw)
 
     # -- manifests -------------------------------------------------------------------
 
@@ -113,32 +166,10 @@ class DiskBacking(Backing):
         p = self._manifest_path(h)
         if p.exists():
             return
-        payload = manifest.model_dump(mode="json")
-        payload["entries"] = [[name, body] for name, body in manifest.entries()]
-        _write_atomic(p, payload)
+        _write_atomic(p, encode_manifest(manifest))
 
     def _manifest_from(self, raw: dict, expected_hash: Optional[str]) -> Manifest:
-        entries = PMap.of({name: body for name, body in raw.pop("entries")})
-        stored_root = raw.pop("root")
-        if entries.root_hash != stored_root:
-            raise Corrupt(f"manifest {(expected_hash or '?')[:12]}: entries do not rebuild to the recorded root")
-        m = Manifest.build(
-            raw["scope"],
-            entries,
-            seq=raw["seq"],
-            parent=raw.get("parent"),
-            note=raw.get("note", ""),
-            author=raw.get("author", ""),
-            rebased_from=raw.get("rebased_from"),
-            merge_parent=raw.get("merge_parent"),
-            activated=raw.get("activated"),
-            resolution=raw.get("resolution", "single-authority"),
-            resolution_version=raw.get("resolution_version", 1),
-            overrode=tuple(tuple(o) for o in raw.get("overrode", [])),
-        )
-        if expected_hash is not None and m.content_hash() != expected_hash:
-            raise Corrupt(f"manifest {expected_hash[:12]} does not hash to its name")
-        return m
+        return decode_manifest(raw, expected_hash)
 
     def get_manifest(self, content_hash: str) -> Optional[Manifest]:
         raw = _read(self._manifest_path(content_hash))
@@ -241,4 +272,14 @@ def load(path: str | Path) -> Store:
     return store
 
 
-__all__ = ["Corrupt", "DiskBacking", "load"]
+__all__ = [
+    "Corrupt",
+    "DiskBacking",
+    "decode_body",
+    "decode_manifest",
+    "decode_skeleton",
+    "encode_body",
+    "encode_manifest",
+    "encode_skeleton",
+    "load",
+]

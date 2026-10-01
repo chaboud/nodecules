@@ -1,0 +1,249 @@
+"""The replica transport: two stores on loopback in one process, a server
+over a store directory, and a pull that converges them.
+
+Each case is something the wire meets between real machines: an empty
+replica, nothing new, one new commit, edits on both sides, a peer that
+lies, and a directory caught mid-write (a head before its manifest, a
+manifest before its bodies), which must become a retry rather than a bad
+import."""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from nodecules.core.disk import Corrupt, DiskBacking, load
+from nodecules.core.store import Edge, Node, Store, make_envelope
+from nodecules.core.transport import Peer, pull, serve
+
+M = "meetings/standup"
+
+
+def _graph(store: Store) -> None:
+    tx = store.transaction(M, author="alice")
+    tx.put(Node(id="audio.wav", kind="raw.audio", scope=M, data={"path": "meeting.wav"}))
+    tx.put(Node(id="strips/asr/segments", kind="asr.segment", scope=M, data={"segments": [0, 1, 2]}, edges=(Edge(target="audio.wav", role="audio"),)))
+    tx.commit("first cook")
+    tx = store.transaction(M, author="bob")
+    tx.put(Node(id="strips/diar/segments", kind="diar.segment", scope=M, data={"turns": []}, edges=(Edge(target="audio.wav", role="audio"),)))
+    tx.commit("diar")
+
+
+def _put(store: Store, name: str, data, author: str = "kid", scope: str = M) -> None:
+    tx = store.transaction(scope, author=author)
+    tx.put(Node(id=name, kind="k", scope=scope, data=data))
+    tx.commit()
+
+
+@pytest.fixture
+def servers():
+    running = []
+
+    def start(backing):
+        s = serve(backing)
+        running.append(s)
+        return s
+
+    yield start
+    for s in running:
+        s.close()
+
+
+def _source(tmp_path: Path, name: str = "a") -> Store:
+    s = Store()
+    _graph(s)
+    s.attach(DiskBacking(tmp_path / name))
+    return s
+
+
+def test_the_server_binds_loopback_by_default(tmp_path, servers):
+    s = servers(DiskBacking(tmp_path / "a"))
+    assert s.host == "127.0.0.1" and s.url.startswith("http://127.0.0.1:")
+
+
+def test_a_pull_into_an_empty_store_reproduces_the_peers_head_and_bodies(tmp_path, servers):
+    a = _source(tmp_path)
+    s = servers(DiskBacking(tmp_path / "a"))
+    b = Store()
+    report = pull(b, Peer(s.url))
+    assert b.current(M).content_hash() == a.current(M).content_hash()
+    assert report.heads == {M: a.current(M).content_hash()}
+    assert report.manifests == 2 and report.bodies == 3  # two commits over the wire; genesis is minted here
+    got = b.get(b.current(M), "strips/asr/segments")
+    assert isinstance(got, Node) and got.data == {"segments": [0, 1, 2]}
+    assert [m.seq for m in b.history(M)] == [2, 1, 0]
+
+
+def test_a_second_pull_with_nothing_new_moves_nothing_in_one_request(tmp_path, servers):
+    _source(tmp_path)
+    peer = Peer(servers(DiskBacking(tmp_path / "a")).url)
+    b = Store()
+    pull(b, peer)
+    again = pull(b, peer)
+    assert again.manifests == 0 and again.bodies == 0 and again.retry == {}
+    assert again.requests == 1  # the heads, and nothing else
+
+
+def test_an_incremental_pull_fetches_only_what_is_new(tmp_path, servers):
+    a = _source(tmp_path)
+    peer = Peer(servers(DiskBacking(tmp_path / "a")).url)
+    b = Store()
+    pull(b, peer)
+    _put(a, "new", 1)
+    report = pull(b, peer)
+    assert report.manifests == 1 and report.bodies == 1
+    assert b.current(M).content_hash() == a.current(M).content_hash()
+
+
+def test_edits_on_both_sides_converge_when_each_pulls_from_the_other(tmp_path, servers):
+    a = _source(tmp_path, "a")
+    b = Store()
+    b.attach(DiskBacking(tmp_path / "b"))
+    sa, sb = servers(DiskBacking(tmp_path / "a")), servers(DiskBacking(tmp_path / "b"))
+    pull(b, Peer(sa.url))
+    _put(a, "from-a", "A", author="alice")
+    _put(b, "from-b", "B", author="bob")
+    pull(a, Peer(sb.url), author="a")
+    pull(b, Peer(sa.url), author="b")
+    assert a.current(M).content_hash() == b.current(M).content_hash()
+    assert a.current(M).merge_parent is not None
+    assert {n for n, _ in b.current(M).entries()} >= {"from-a", "from-b"}
+    assert load(tmp_path / "b").current(M).content_hash() == a.current(M).content_hash()  # durable on b's disk
+
+
+def test_parents_are_imported_before_children(tmp_path, servers):
+    _source(tmp_path)
+    _put(load(tmp_path / "a"), "third", 3)
+    order: list = []
+
+    class Recording(DiskBacking):
+        def put_manifest(self, manifest):
+            if all(m.content_hash() != manifest.content_hash() for m in order):  # merge_head re-imports; the disk ignores repeats
+                order.append(manifest)
+            super().put_manifest(manifest)
+
+    b = Store()
+    b.attach(Recording(tmp_path / "b"))
+    pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
+    seen = set()
+    for m in order:
+        assert m.parent is None or m.parent in seen or b.manifest(m.parent) is not None
+        seen.add(m.content_hash())
+    assert [m.seq for m in order if m.scope == M] == [0, 1, 2, 3]  # all of them, oldest first
+
+
+def test_a_peer_that_lies_is_refused_and_nothing_is_merged(tmp_path, servers):
+    a = _source(tmp_path)
+
+    class Liar(DiskBacking):
+        def get_body(self, content_hash):
+            return Node(id="x", kind="k", scope=M, data="not what you asked for")
+
+    b = Store()
+    before = b.current(M).content_hash()
+    with pytest.raises(Corrupt):
+        pull(b, Peer(servers(Liar(tmp_path / "a")).url))
+    assert b.current(M).content_hash() == before != a.current(M).content_hash()
+
+
+def test_a_head_whose_manifest_has_not_arrived_is_retried_not_merged(tmp_path, servers):
+    a = _source(tmp_path)
+    head = a.current(M).content_hash()
+    mf = tmp_path / "a" / "manifests" / f"{head}.json"
+    saved = mf.read_bytes()
+    mf.unlink()  # a git checkout wrote the head file first
+    peer = Peer(servers(DiskBacking(tmp_path / "a")).url)
+    b = Store()
+    report = pull(b, peer)
+    assert report.retry == {M: [head]}
+    assert b.current(M).content_hash() != head
+    mf.write_bytes(saved)
+    report = pull(b, peer)
+    assert report.retry == {} and b.current(M).content_hash() == head
+
+
+def test_a_manifest_whose_bodies_have_not_arrived_is_retried_not_merged(tmp_path, servers):
+    a = _source(tmp_path)
+    head = a.current(M).content_hash()
+    diar = dict(a.current(M).entries())["strips/diar/segments"]
+    files = [tmp_path / "a" / sub / f"{diar}.json" for sub in ("bodies", "skeletons")]
+    saved = [f.read_bytes() for f in files]
+    for f in files:
+        f.unlink()  # the manifest arrived, its body has not
+    peer = Peer(servers(DiskBacking(tmp_path / "a")).url)
+    b = Store()
+    report = pull(b, peer)
+    assert report.retry == {M: [head]}
+    assert b.current(M).content_hash() != head
+    for f, data in zip(files, saved):
+        f.write_bytes(data)
+    report = pull(b, peer)
+    assert report.retry == {} and b.current(M).content_hash() == head
+    assert b.get(b.current(M), "strips/diar/segments").data == {"turns": []}
+
+
+def test_a_body_pruned_on_the_peer_does_not_block_the_pull(tmp_path, servers):
+    a = _source(tmp_path)
+    asr = a.get(a.current(M), "strips/asr/segments")
+    tx = a.transaction(M, author="alice")
+    tx.put(make_envelope(asr, recipe={"realization": "r"}, inputs={}))
+    tx.commit()
+    a.prune(asr.content_hash())  # released on purpose: the skeleton stays
+    b = Store()
+    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
+    assert report.retry == {} and b.current(M).content_hash() == a.current(M).content_hash()
+    assert not b.has_body(asr.content_hash())
+
+
+def test_only_the_scopes_asked_for_are_pulled(tmp_path, servers):
+    a = _source(tmp_path)
+    _put(a, "elsewhere", 1, scope="other/scope")
+    b = Store()
+    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url), scopes=[M])
+    assert set(report.heads) == {M} and "other/scope" not in b.scopes()
+
+
+def test_the_server_refuses_a_name_that_is_not_a_hash(tmp_path, servers):
+    _source(tmp_path)
+    s = servers(DiskBacking(tmp_path / "a"))
+    for path in ("/body/..%2F..%2Fsecret", "/manifest/abc", "/skeleton/" + "g" * 64):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(s.url + path, timeout=5)
+        assert e.value.code == 400
+    req = urllib.request.Request(s.url + "/objects", data=json.dumps({"bodies": ["../x"]}).encode(), method="POST")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=5)
+    assert e.value.code == 400
+
+
+def test_single_objects_are_served_for_inspection(tmp_path, servers):
+    a = _source(tmp_path)
+    s = servers(DiskBacking(tmp_path / "a"))
+    peer = Peer(s.url)
+    head = a.current(M)
+    assert peer.heads() == {M: [head.content_hash()]}
+    assert peer.get_manifest(head.content_hash()).content_hash() == head.content_hash()
+    body = dict(head.entries())["audio.wav"]
+    assert peer.get_body(body).content_hash() == body
+    assert peer.get_skeleton(body)[0] == "raw.audio"
+    assert peer.get_body("0" * 64) is None
+
+
+def test_a_store_attached_before_its_first_commit_pulls_whole(tmp_path, servers):
+    """Attach first, commit after (how fulfil.py and seed_exchange.py work):
+    the scope's genesis manifest is minted in memory and never written, so
+    every chain on disk ends in a parent with no file. Genesis is the same
+    hash in every store, so the pull mints it locally instead of asking."""
+    a = Store()
+    a.attach(DiskBacking(tmp_path / "a"))
+    _graph(a)
+    genesis = a.manifest(a.current(M).parent).parent
+    assert not (tmp_path / "a" / "manifests" / f"{genesis}.json").exists()
+    b = Store()
+    report = pull(b, Peer(servers(DiskBacking(tmp_path / "a")).url))
+    assert report.retry == {} and b.current(M).content_hash() == a.current(M).content_hash()
+    assert [m.seq for m in b.history(M)] == [2, 1, 0]

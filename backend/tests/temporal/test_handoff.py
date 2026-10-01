@@ -140,3 +140,57 @@ def test_the_judgement_check_knows_the_hard_limits():
     assert ok
     ok, text = seed2._check_tools({"tool_calls": [{"name": "lookup_weather", "arguments": {"_raw": "{broken"}}]})
     assert not ok
+
+
+def test_an_exchange_round_trips_over_the_transport_in_both_directions(tmp_path: Path):
+    """The real flow without git: the cloud seeds requests; the Spark pulls
+    them from the cloud's server and fulfils them (`fulfil.py --peer`); the
+    cloud pulls the answers back from the Spark's server; verify sees cache
+    hits whose receipts name the Spark."""
+    from nodecules.core.disk import DiskBacking
+    from nodecules.core.transport import Peer, pull, serve
+
+    cloud, spark = tmp_path / "cloud", tmp_path / "spark"
+    assert run(str(HANDOFF / "seed_exchange.py"), "--store", str(cloud)).returncode == 0
+    cloud_server = serve(DiskBacking(cloud))
+    try:
+        done = run(str(HANDOFF / "fulfil.py"), "--store", str(spark), "--peer", cloud_server.url, "--provider", "echo", "--by", "spark")
+    finally:
+        cloud_server.close()
+    assert done.returncode == 0, done.stderr
+    assert "pulled from" in done.stdout and "2 request(s) fulfilled" in done.stdout
+
+    spark_server = serve(DiskBacking(spark))
+    try:
+        back = pull(load(cloud), Peer(spark_server.url), author="cloud")
+    finally:
+        spark_server.close()
+    assert back.retry == {} and back.manifests > 0
+    verified = run(str(HANDOFF / "seed_exchange.py"), "--store", str(cloud), "--verify")
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    assert "both steps are cache hits" in verified.stdout
+
+
+def test_the_transport_cli_serves_until_its_stdin_closes_and_pulls(tmp_path: Path):
+    """`transport.py serve` prints its URL and lives as long as its stdin
+    (so one started over ssh dies with the connection); `transport.py pull`
+    reports what it moved."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    assert run(str(HANDOFF / "seed_exchange.py"), "--store", str(src)).returncode == 0
+    server = subprocess.Popen(
+        [sys.executable, str(HANDOFF / "transport.py"), "serve", "--store", str(src), "--until-stdin-closes"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=ENV,
+    )
+    try:
+        line = server.stdout.readline()
+        assert line.startswith("serving ") and "http://127.0.0.1:" in line, line + server.stderr.read()
+        url = line.split()[-1]
+        pulled = run(str(HANDOFF / "transport.py"), "pull", "--store", str(dst), "--peer", url, "--by", "mbp")
+        assert pulled.returncode == 0, pulled.stderr
+        assert "manifests" in pulled.stdout and "bodies" in pulled.stdout and "retry 0" in pulled.stdout
+        again = run(str(HANDOFF / "transport.py"), "pull", "--store", str(dst), "--peer", url, "--by", "mbp")
+        assert "0 manifests, 0 bodies" in again.stdout and "1 requests" in again.stdout
+    finally:
+        server.stdin.close()
+        assert server.wait(timeout=10) == 0
+    assert load(dst).current("trip/plan").content_hash() == load(src).current("trip/plan").content_hash()

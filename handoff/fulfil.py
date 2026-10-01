@@ -21,6 +21,9 @@ envelope names who fulfilled it. Back on the cloud side the next
     --dry-run                  list what would be fulfilled and stop
     --loop SECS                keep going: pull, fulfil, push, wait, repeat
     --git                      pull --rebase before each round, commit and push the store after it
+    --peer URL                 pull the store from a transport server before each round
+                               (handoff/transport.py); the requester pulls the answers back
+                               from yours, so nothing is pushed
 
 Nothing here is core: the store's merge rules (content-addressed files,
 one head file per candidate, merged on attach) are what make a git
@@ -51,6 +54,7 @@ from nodecules.core.generation import Generator, Realization  # noqa: E402
 from nodecules.core.llm_providers import ToolAwareProvider  # noqa: E402
 from nodecules.core.llm_realization import llm_realization  # noqa: E402
 from nodecules.core.tracking import JsonlSink, Tracker  # noqa: E402
+from nodecules.core.transport import Peer, pull  # noqa: E402
 
 
 def make_provider(a: argparse.Namespace) -> ToolAwareProvider:
@@ -155,11 +159,16 @@ async def main(a: argparse.Namespace) -> int:
     repo = repo_of(Path(a.store)) if a.git else None
     if a.git and repo is None:
         raise SystemExit("--git needs the store inside a git checkout")
+    peer = Peer(a.peer) if a.peer else None
     while True:
         if repo is not None:
             r = git(repo, "pull", "--rebase", "-q", check=False)
             if r.returncode != 0:
                 print(f"  pull failed: {r.stderr.strip()}", file=sys.stderr)
+        if peer is not None:
+            rep = pull(load(a.store), peer, scopes=a.scope, author=a.by)
+            waiting = sum(len(v) for v in rep.retry.values())
+            print(f"pulled from {peer.url}: {rep.manifests} manifests, {rep.bodies} bodies, retry {waiting}")
         n = await round_once(a, realizations)
         print(f"round: {n} request(s) {'listed' if a.dry_run else 'fulfilled'} in {a.store}")
         if repo is not None and n and not a.dry_run:
@@ -185,6 +194,7 @@ if __name__ == "__main__":
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--loop", type=float, default=0.0, metavar="SECS")
     ap.add_argument("--git", action="store_true")
+    ap.add_argument("--peer", help="http://host:port of a transport server to pull the store from first")
     args = ap.parse_args()
     if not args.handle:
         args.handle = ["llm.spark@1"]

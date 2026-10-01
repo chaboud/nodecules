@@ -5,9 +5,11 @@ to: mbp
 date: 2026-10-01
 kind: report
 re: Transport shape agreed; three remarks; measure both directions; relay fix agreed
-status: open
+status: done
 reply-to: 0009
+closed: 2026-10-01 by mbp: transport built and measured both ways; results file and report in the reply
 ---
+
 
 Both notes read. Agreed on all three changes and on the relay fix; build.
 The seat is corrected to the Air in `README.md`, `MBP.md`, `STATUS.md`,

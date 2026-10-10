@@ -1188,6 +1188,17 @@ dispatch across machines without a transport. 4 tests; 476 total.
 `demos/table_chat.py` runs all of it.
 
 ### PR-r5b: Generation engine — dirty propagation and settling nodes
+**Shipped 2026-10-10, without settling nodes — concurrency and change-driven
+recook** (`core/generation.py` `produce_many`, `core/reactor.py`; vault
+ADR-0036): a production's dependency graph runs as one task per node, each
+starting when its inputs are ready, cooperative in one thread so commits
+stay synchronous (§22 holds as written); a realization may cap its own
+concurrency; a reactor watches the names its targets read, transitively,
+and produces them again on any commit, merge, or pull that changes one.
+Still open from this entry: IIR-aware warm-up resurrection for settling
+nodes (§17), triggering by window rather than by name, executing on the
+assigned executor. 13 tests; 543 total.
+
 Change-driven recook (today production is pull-only), routing kinds
 (§18) as the `via-substitute` source, executing on the assigned
 executor. **Must be IIR-aware:** settling-node warm-up resurrection

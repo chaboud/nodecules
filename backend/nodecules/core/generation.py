@@ -46,8 +46,10 @@ wraps its own nodes as `Realization`s.
 
 from __future__ import annotations
 
+import asyncio
+
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Mapping, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -88,6 +90,9 @@ class Realization:
     handle: str
     cook: CookFn
     deterministic: bool = False
+    # At most this many cooks of this realization run at once (None: no limit).
+    # A model server with one slot, or one shared with another system, says 1.
+    concurrency: Optional[int] = None
 
 
 class Routed:
@@ -229,6 +234,10 @@ class Generator:
         self.author = author
         self.plan_hash = plan_hash
         self.cooks = 0  # how many times a realization actually ran
+        # Productions running now, so two calls that need the same node share
+        # one cook instead of racing (REFERENCE-MODEL §22: one producer per node).
+        self._inflight: Dict[Tuple[str, str], "asyncio.Task[Generation]"] = {}
+        self._limits: Dict[Tuple[str, int], asyncio.Semaphore] = {}  # (handle, loop id) -> its concurrency cap
 
     # -- public --------------------------------------------------------------------
 
@@ -236,16 +245,82 @@ class Generator:
         """Produce `node_id` in `scope`, producing whatever it depends on
         first. Returns the target's generation; `lost` names the reference
         that could not be recovered."""
-        order = self._order(scope, node_id)
-        result: Optional[Generation] = None
-        problems: Dict[str, Generation] = {}  # ref -> the lost or failed generation, so consumers carry the root cause
-        for sc, nid in order:
-            result = await self._produce_one(sc, nid, problems)
-            self._track(result)
-            if result.outcome in ("failed", "lost", "pending"):
-                problems[f"{sc}:{nid}"] = result
-        assert result is not None
+        out = await self.produce_many([(scope, node_id)])
+        return out[(scope, node_id)]
+
+    async def produce_many(self, targets: Iterable[Tuple[str, str]]) -> Dict[Tuple[str, str], Generation]:
+        """Produce several targets, each node of their dependency graphs
+        once, cooking every node as soon as its inputs are ready: independent
+        branches cook at the same time.
+
+        Concurrency here is cooperative, in one thread. Cooks overlap while
+        they wait (a model call, a remote fetch); every commit is still a
+        synchronous critical section, created and committed with no await in
+        between, so a transaction's base is never stale and writes to
+        disjoint names never conflict (REFERENCE-MODEL §22). A realization
+        that declares `concurrency` is capped at that many cooks at once. A
+        node another call is already producing is awaited, not cooked twice.
+
+        If a node raises (a dangling edge, no realization and no deferral),
+        the targets that depend on it raise; the rest of this call's
+        productions are allowed to finish first, so nothing is left running
+        unobserved."""
+        wanted = [(sc, nid) for sc, nid in targets]
+        order: List[Tuple[str, str]] = []
+        placed: Set[Tuple[str, str]] = set()
+        for sc, nid in wanted:
+            for key in self._order(sc, nid):
+                if key not in placed:
+                    placed.add(key)
+                    order.append(key)  # post-order per target, so a node's inputs are placed before it
+        tasks: Dict[Tuple[str, str], "asyncio.Task[Generation]"] = {}
+        for key in order:
+            node = self.store.get(self.store.current(key[0]), key[1])
+            deps = []
+            for e in node.edges if node is not None else ():
+                child = (e.scope or key[0], e.target)
+                if child in tasks and child not in deps:
+                    deps.append(child)
+            tasks[key] = self._start(key, [(d, tasks[d]) for d in deps])
+        try:
+            return {key: await tasks[key] for key in wanted}
+        finally:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    def _start(self, key: Tuple[str, str], deps: List[Tuple[Tuple[str, str], "asyncio.Task[Generation]"]]) -> "asyncio.Task[Generation]":
+        running = self._inflight.get(key)
+        loop = asyncio.get_running_loop()
+        if running is not None and not running.done() and running.get_loop() is loop:
+            return running
+        task = loop.create_task(self._produce_after(key, deps))
+        self._inflight[key] = task
+
+        def _forget(t: "asyncio.Task[Generation]", key: Tuple[str, str] = key) -> None:
+            if self._inflight.get(key) is t:
+                del self._inflight[key]
+
+        task.add_done_callback(_forget)
+        return task
+
+    async def _produce_after(self, key: Tuple[str, str], deps: List[Tuple[Tuple[str, str], "asyncio.Task[Generation]"]]) -> Generation:
+        problems: Dict[str, Generation] = {}  # ref -> the lost, failed, or pending input, so consumers carry the root cause
+        for (dsc, dnid), task in deps:
+            g = await task
+            if g.outcome in ("failed", "lost", "pending"):
+                problems[f"{dsc}:{dnid}"] = g
+        result = await self._produce_one(key[0], key[1], problems)
+        self._track(result)
         return result
+
+    def _limit(self, realization: Realization) -> Optional[asyncio.Semaphore]:
+        if realization.concurrency is None:
+            return None
+        loop = asyncio.get_running_loop()
+        k = (realization.handle, id(loop))
+        sem = self._limits.get(k)
+        if sem is None:
+            sem = self._limits[k] = asyncio.Semaphore(max(1, int(realization.concurrency)))
+        return sem
 
     async def dispatch(self, plan: Any, scope: str) -> Dict[str, Generation]:
         """Run a placement plan: its assignments become bindings, every
@@ -262,11 +337,9 @@ class Generator:
             plan_hash=plan.content_hash(),
         )
         sub._executors = executors  # type: ignore[attr-defined]
-        out: Dict[str, Generation] = {}
-        for a in plan.assignments:
-            out[a.node_id] = await sub.produce(scope, a.node_id)
+        produced = await sub.produce_many([(scope, a.node_id) for a in plan.assignments])
         self.cooks += sub.cooks
-        return out
+        return {a.node_id: produced[(scope, a.node_id)] for a in plan.assignments}
 
     def _track(self, g: Generation) -> None:
         if self.tracker is None:
@@ -436,7 +509,12 @@ class Generator:
         while True:
             attempts += 1
             try:
-                data = await realization.cook(inputs, params)
+                limit = self._limit(realization)
+                if limit is None:
+                    data = await realization.cook(inputs, params)
+                else:
+                    async with limit:
+                        data = await realization.cook(inputs, params)
                 self.cooks += 1
                 break
             except Exception as exc:  # a realization failed: a state, not a crash

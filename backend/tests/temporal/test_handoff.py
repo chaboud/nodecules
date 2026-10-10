@@ -37,9 +37,9 @@ def test_seed_then_fulfil_with_a_stand_in_model_then_verify_cache_hits(tmp_path:
     assert "would fulfil trip/plan:consider/dest" in listed.stdout and "2 request(s) listed" in listed.stdout
     assert not (store / "events-spark.jsonl").exists()  # a dry run writes nothing
 
-    done = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark")
+    done = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark", "--concurrency", "2")
     assert done.returncode == 0, done.stderr
-    assert "fulfilled trip/plan:consider/dest" in done.stdout and "fulfilled chat/spark:reply" in done.stdout
+    assert "fulfilled trip/plan:consider/dest at +" in done.stdout and "fulfilled chat/spark:reply at +" in done.stdout
     assert "2 request(s) fulfilled" in done.stdout
 
     # The worker's events are its own file; the cloud's are untouched.

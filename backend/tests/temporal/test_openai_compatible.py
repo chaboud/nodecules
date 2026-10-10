@@ -3,6 +3,7 @@ response parsing. The first real model behind it is the Spark's job."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -86,3 +87,49 @@ async def test_a_thinking_models_reasoning_is_kept_apart_so_an_empty_answer_can_
     r = await p.generate_with_tools([{"role": "user", "content": "think"}], model="m", max_tokens=40)
     assert r.content == "" and r.tool_calls == [] and r.stop_reason == "max_tokens"
     assert r.reasoning == "hmm " * 10
+
+
+@pytest.mark.asyncio
+async def test_two_calls_overlap_on_the_wire_instead_of_blocking_the_event_loop():
+    """The HTTP call blocks, so it runs in a worker thread; two productions
+    calling the same engine at once are both in flight at the server. Before
+    this, the first call held the event loop and concurrency was nominal."""
+    import time
+    from http.server import ThreadingHTTPServer
+
+    state = {"now": 0, "max": 0}
+    lock = threading.Lock()
+
+    class Slow(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n))
+            with lock:
+                state["now"] += 1
+                state["max"] = max(state["max"], state["now"])
+            time.sleep(0.2)
+            with lock:
+                state["now"] -= 1
+            data = json.dumps({"choices": [{"message": {"role": "assistant", "content": body["messages"][-1]["content"]}, "finish_reason": "stop"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        p = OpenAICompatibleProvider(f"http://127.0.0.1:{srv.server_port}")
+        a, b = await asyncio.gather(
+            p.generate_with_tools([{"role": "user", "content": "one"}], model="m"),
+            p.generate_with_tools([{"role": "user", "content": "two"}], model="m"),
+        )
+        assert (a.content, b.content) == ("one", "two")
+        assert state["max"] == 2
+    finally:
+        srv.shutdown()

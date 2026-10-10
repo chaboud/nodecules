@@ -12,6 +12,7 @@ model behind it is the Spark's job, per `handoff/SPARK.md`.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import urllib.error
 import urllib.request
@@ -71,7 +72,9 @@ class OpenAICompatibleProvider(ToolAwareProvider):
             payload["tools"] = [{"type": "function", "function": {"name": t.name, "description": getattr(t, "description", ""), "parameters": getattr(t, "parameters", {}) or {}}} for t in tools]
         if response_schema:
             payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "response", "schema": response_schema}}
-        raw = self._post("/v1/chat/completions", payload)
+        # The HTTP call blocks, so it runs in a worker thread: concurrent productions
+        # overlap their model calls instead of waiting on each other in the event loop.
+        raw = await asyncio.to_thread(self._post, "/v1/chat/completions", payload)
         self.last_raw = raw
         choice = (raw.get("choices") or [{}])[0]
         msg = choice.get("message") or {}

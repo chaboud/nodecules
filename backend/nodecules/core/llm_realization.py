@@ -72,6 +72,7 @@ def llm_realization(
     *,
     deterministic: bool = False,
     default_model: str = "default",
+    concurrency: Optional[int] = None,
 ) -> Realization:
     """Wrap a provider as a realization named `handle`."""
 
@@ -113,7 +114,7 @@ def llm_realization(
             "model": model,
         }
 
-    return Realization(handle=handle, cook=cook, deterministic=deterministic)
+    return Realization(handle=handle, cook=cook, deterministic=deterministic, concurrency=concurrency)
 
 
 __all__ = ["EmptyAnswer", "TruncatedAnswer", "llm_realization", "render_inputs"]

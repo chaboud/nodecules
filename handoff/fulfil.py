@@ -19,6 +19,7 @@ envelope names who fulfilled it. Back on the cloud side the next
     --provider openai          any OpenAI-compatible endpoint (vLLM, llama.cpp, Ollama, LM Studio)
     --provider pkg.mod:factory a zero-argument factory returning a ToolAwareProvider
     --dry-run                  list what would be fulfilled and stop
+    --concurrency N            requests in flight to the engine at once (default 1)
     --loop SECS                keep going: pull, fulfil, push, wait, repeat
     --git                      pull --rebase before each round, commit and push the store after it
     --peer URL                 pull the store from a transport server before each round
@@ -78,16 +79,16 @@ def make_provider(a: argparse.Namespace) -> ToolAwareProvider:
     raise SystemExit(f"unknown provider {a.provider!r}")
 
 
-def make_realizations(provider: ToolAwareProvider, handles: List[str], model: Optional[str]) -> List[Realization]:
+def make_realizations(provider: ToolAwareProvider, handles: List[str], model: Optional[str], concurrency: int = 1) -> List[Realization]:
     out: List[Realization] = []
     for h in handles:
-        base = llm_realization(provider, h, default_model=model or "default")
+        base = llm_realization(provider, h, default_model=model or "default", concurrency=concurrency)
         if model:
             # The operator's served model name wins over whatever the recipe says.
             async def cook(inputs: Dict[str, Any], params: Dict[str, Any], _base: Realization = base) -> Any:
                 return await _base.cook(inputs, {**params, "model": model})
 
-            out.append(Realization(handle=h, cook=cook, deterministic=False))
+            out.append(Realization(handle=h, cook=cook, deterministic=False, concurrency=concurrency))
         else:
             out.append(base)
     return out
@@ -115,7 +116,7 @@ async def round_once(a: argparse.Namespace, realizations: List[Realization]) -> 
     handles = {r.handle for r in realizations}
     gen = Generator(store, realizations, author=a.by, tracker=tracker, defer=True)
     scopes = a.scope or list(store.scopes())
-    done = 0
+    todo = []
     for scope in scopes:
         for req in requests(store, scope):
             if req["realization"] not in handles:
@@ -123,17 +124,29 @@ async def round_once(a: argparse.Namespace, realizations: List[Realization]) -> 
                 continue
             if a.dry_run:
                 print(f"  would fulfil {scope}:{req['for']} with {req['realization']} · inputs {list(req['inputs'])}")
-                done += 1
                 continue
-            t0 = time.monotonic()
-            g = await gen.produce(scope, req["for"])
-            ms = int((time.monotonic() - t0) * 1000)
-            if g.cooked:
-                done += 1
-                preview = g.node.data.get("content") if isinstance(g.node.data, dict) else g.node.data
-                print(f"  fulfilled {scope}:{req['for']} in {ms} ms · {str(preview)[:96]!r}")
-            else:
-                print(f"  {g.outcome:9} {scope}:{req['for']} · {g.error or g.note or ''}")
+            todo.append((scope, req["for"]))
+    if a.dry_run:
+        return sum(1 for scope in scopes for req in requests(store, scope) if req["realization"] in handles)
+
+    # Every request at once; each realization's --concurrency caps how many reach
+    # the engine together (default 1, for a server shared with something else).
+    # Times are from the start of the round to each answer, so with a cap of 1
+    # they read as a queue, and with a higher cap the round is the slowest step.
+    t0 = time.monotonic()
+
+    async def one(scope: str, node: str):
+        g = await gen.produce(scope, node)
+        return scope, node, g, int((time.monotonic() - t0) * 1000)
+
+    done = 0
+    for scope, node, g, ms in await asyncio.gather(*(one(sc, nd) for sc, nd in todo)):
+        if g.cooked:
+            done += 1
+            preview = g.node.data.get("content") if isinstance(g.node.data, dict) else g.node.data
+            print(f"  fulfilled {scope}:{node} at +{ms} ms · {str(preview)[:96]!r}")
+        else:
+            print(f"  {g.outcome:9} {scope}:{node} · {g.error or g.note or ''}")
     return done
 
 
@@ -155,7 +168,7 @@ def commit_and_push(repo: Path, store: Path, by: str, n: int) -> None:
 
 async def main(a: argparse.Namespace) -> int:
     provider = make_provider(a)
-    realizations = make_realizations(provider, a.handle, a.model)
+    realizations = make_realizations(provider, a.handle, a.model, a.concurrency)
     repo = repo_of(Path(a.store)) if a.git else None
     if a.git and repo is None:
         raise SystemExit("--git needs the store inside a git checkout")
@@ -187,6 +200,8 @@ if __name__ == "__main__":
     ap.add_argument("--api-key", help="a key, or env:NAME")
     ap.add_argument("--model", help="the served model name; overrides the recipe's")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--concurrency", type=int, default=1, metavar="N",
+                    help="how many requests may reach the engine at once (default 1: the Spark's servers are shared with keyhole; raise it only for a server with free slots)")
     ap.add_argument("--extra-body", default="", metavar="JSON",
                     help='engine-specific request fields merged into every call, e.g. \'{"chat_template_kwargs": {"enable_thinking": false}}\' for a thinking model on llama.cpp')
     ap.add_argument("--handle", action="append", default=None, help="realization handle(s) this machine offers (default: llm.spark@1)")

@@ -11,10 +11,11 @@ Kept separate from the ADT so `strip_access.py` stays dependency-light
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Any
+from typing import Any, Mapping, Optional
 
 from .strip_access import (
     AbsoluteMs,
+    Ago,
     RangePattern,
     SelfWindowEnd,
     SelfWindowStart,
@@ -23,20 +24,69 @@ from .strip_access import (
 from .time import TimeRange
 
 
-def resolve_time_expr(expr: TimeExpr, window: TimeRange) -> int:
-    """Resolve a symbolic `TimeExpr` to an integer ms against `window`.
+def needs_window(expr: TimeExpr) -> bool:
+    return isinstance(expr, (SelfWindowStart, SelfWindowEnd)) or (isinstance(expr, Ago) and expr.anchor != "head")
+
+
+def needs_head(expr: TimeExpr) -> bool:
+    return isinstance(expr, Ago) and expr.anchor == "head"
+
+
+def resolve_time_expr(expr: TimeExpr, window: Optional[TimeRange], head: Optional[int] = None) -> int:
+    """Resolve a symbolic `TimeExpr` to an integer ms against `window` (the
+    reading node's active window) and `head` (the strip's latest time).
 
     `SelfWindowStart` / `SelfWindowEnd` resolve to the reading node's
     active window bounds; `AbsoluteMs` resolves to its own fixed value
-    regardless of the window.
+    regardless of the window; `Ago` looks back from its anchor, never below 0.
     """
+    if isinstance(expr, AbsoluteMs):
+        return expr.ms
+    if needs_window(expr) and window is None:
+        raise ValueError("this read is relative to the reader's window: give the node params {'window': {'start_ms', 'end_ms'}}")
     if isinstance(expr, SelfWindowStart):
         return window.start_ms
     if isinstance(expr, SelfWindowEnd):
         return window.end_ms
-    if isinstance(expr, AbsoluteMs):
-        return expr.ms
+    if isinstance(expr, Ago):
+        if expr.anchor == "head":
+            if head is None:
+                raise ValueError("a head-relative time needs the strip's head")
+            base = head
+        else:
+            base = window.start_ms if expr.anchor == "self_window_start" else window.end_ms
+        return max(0, base - expr.ms)
     raise TypeError(f"unhandled TimeExpr variant: {type(expr).__name__}")
+
+
+def head_time(elements: Any, field: str) -> Optional[int]:
+    """The latest time any element reaches in `field` (its greatest
+    `end_ms`), or None for an empty strip. Elements without the field are
+    skipped; a strip that never carries it has no head."""
+    best: Optional[int] = None
+    for el in elements:
+        try:
+            value = _field(el, field)
+        except AttributeError:
+            continue
+        for v in value if isinstance(value, (list, tuple)) else (value,):
+            end = _field(v, "end_ms")
+            best = end if best is None or end > best else best
+    return best
+
+
+def earliest_time(elements: Any, field: str) -> Optional[int]:
+    """The earliest time any element starts in `field`, or None."""
+    best: Optional[int] = None
+    for el in elements:
+        try:
+            value = _field(el, field)
+        except AttributeError:
+            continue
+        for v in value if isinstance(value, (list, tuple)) else (value,):
+            start = _field(v, "start_ms")
+            best = start if best is None or start < best else best
+    return best
 
 
 @dataclass(frozen=True)
@@ -53,13 +103,14 @@ class ResolvedRange:
     window: TimeRange
 
 
-def resolve_range(pattern: RangePattern, window: TimeRange) -> ResolvedRange:
-    """Resolve a `RangePattern` against the reading node's active window."""
+def resolve_range(pattern: RangePattern, window: Optional[TimeRange], head: Optional[int] = None) -> ResolvedRange:
+    """Resolve a `RangePattern` against the reading node's active window and,
+    for head-relative bounds, the strip's head."""
     return ResolvedRange(
         field=pattern.field,
         window=TimeRange(
-            start_ms=resolve_time_expr(pattern.start, window),
-            end_ms=resolve_time_expr(pattern.end, window),
+            start_ms=resolve_time_expr(pattern.start, window, head),
+            end_ms=resolve_time_expr(pattern.end, window, head),
         ),
     )
 
@@ -105,6 +156,10 @@ def range_matches(resolved: ResolvedRange, element: Any) -> bool:
 
 __all__ = [
     "ResolvedRange",
+    "earliest_time",
+    "head_time",
+    "needs_head",
+    "needs_window",
     "range_matches",
     "resolve_range",
     "resolve_time_expr",

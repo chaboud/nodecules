@@ -66,8 +66,8 @@ from .store import (
     envelope_id,
     make_envelope,
 )
-from .strip_access import AllPattern, LatestPattern, RangePattern
-from .strip_resolve import range_matches, resolve_range
+from .strip_access import AllPattern, FromHead, FromSelf, Index, LatestPattern, OrdinalPattern, RangePattern
+from .strip_resolve import earliest_time, head_time, needs_head, range_matches, resolve_range, resolve_time_expr
 from .time import TimeRange
 
 RECIPE_ROLE = "recipe"
@@ -142,6 +142,10 @@ class ResolvedInput(BaseModel):
     name: str
     content_hash: str
     pattern: Dict[str, Any]
+    # The hash of what was read, when the pattern selected part of the node
+    # (latest, a window, a slice). The cache key uses it, so an append outside
+    # a reader's window is a cache hit. None for a whole read: the node's hash.
+    read_hash: Optional[str] = None
 
 
 class Generation(BaseModel):
@@ -179,22 +183,107 @@ def declaration_hash(node: Node) -> str:
     return canonical_hash({"kind": node.kind, "edges": [e.model_dump(mode="json") for e in node.edges]})
 
 
-def select(pattern: Any, data: Any, window: Optional[TimeRange]) -> Any:
-    """Apply an edge's access pattern to the target's data. `All` is the
-    whole value; `Latest` is the last element of a list (or the value);
-    `Range` filters a list of elements by the node's window."""
+class Read:
+    """What one edge's pattern took from its target: the value, the hash of
+    what was read (None for a whole read), how the symbolic pattern resolved
+    (for the receipt), and why the read could not be served: `lost` when it
+    needs elements the strip released, `waiting` when it needs elements that
+    do not exist yet."""
+
+    __slots__ = ("value", "read_hash", "resolved", "lost", "waiting")
+
+    def __init__(self, value: Any = None, read_hash: Optional[str] = None, resolved: Optional[Dict[str, Any]] = None, lost: Optional[str] = None, waiting: Optional[str] = None) -> None:
+        self.value = value
+        self.read_hash = read_hash
+        self.resolved = resolved
+        self.lost = lost
+        self.waiting = waiting
+
+
+def _strip_view(data: Any, kind: Optional[str]) -> Tuple[int, Any]:
+    if kind == "strip" and isinstance(data, dict) and "strip_floor" in data and isinstance(data.get("elements"), list):
+        return int(data["strip_floor"]), data["elements"]
+    return 0, data
+
+
+def read(pattern: Any, data: Any, window: Optional[TimeRange], position: Optional[int] = None, kind: Optional[str] = None) -> Read:
+    """Apply an edge's access pattern to its target's data. `All` is the whole
+    value; `Latest` the last element of a list (or the value); `Range` the
+    elements whose time field meets a window, the window relative to the
+    reader's or to the strip's head; `Ordinal` a slice by position, relative
+    to the head or to the reader's `position`. The relative forms only look
+    back, and a read into released elements is lost, never silently short."""
+    floor, data = _strip_view(data, kind)
     if isinstance(pattern, AllPattern):
-        return data
+        if floor:
+            return Read(lost=f"an All read needs every element, and elements [0, {floor}) were released; read a window (last(n), or a range) instead")
+        return Read(value=data)
     if isinstance(pattern, LatestPattern):
-        return data[-1] if isinstance(data, list) and data else data
+        value = data[-1] if isinstance(data, list) and data else data
+        return Read(value=value, read_hash=canonical_hash(value))
     if isinstance(pattern, RangePattern):
-        if window is None:
-            raise ValueError("a Range pattern needs the node's window: give it params {'window': {'start_ms', 'end_ms'}}")
         if not isinstance(data, list):
             raise ValueError("a Range pattern reads a list of elements")
-        resolved = resolve_range(pattern, window)
-        return [el for el in data if range_matches(resolved, el)]
+        head = head_time(data, pattern.field) if (needs_head(pattern.start) or needs_head(pattern.end)) else None
+        if (needs_head(pattern.start) or needs_head(pattern.end)) and head is None:
+            return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": None, "count": 0, "note": "no head: the strip has no element with this field"})
+        start = _resolve_bound(pattern.start, window, head)
+        end = _resolve_bound(pattern.end, window, head)
+        if end <= start:
+            return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": [start, end], "count": 0})
+        resolved = resolve_range(pattern, window, head)
+        if floor:
+            earliest = earliest_time(data, pattern.field)
+            if earliest is None or resolved.window.start_ms < earliest:
+                return Read(lost=f"the window starts at {resolved.window.start_ms}, before the earliest retained element ({earliest}); elements [0, {floor}) were released")
+        value = [el for el in data if range_matches(resolved, el)]
+        return Read(value=value, read_hash=canonical_hash(value), resolved={"pattern": "range", "field": pattern.field, "window": [resolved.window.start_ms, resolved.window.end_ms], "count": len(value)})
+    if isinstance(pattern, OrdinalPattern):
+        if not isinstance(data, list):
+            raise ValueError("an Ordinal pattern reads a list of elements")
+        total = floor + len(data)
+        start = _resolve_position(pattern.start, total, position)
+        end = _resolve_position(pattern.end, total, position)
+        if end > total:
+            return Read(waiting=f"element {end - 1} does not exist yet (the strip has {total})")
+        start = max(0, start)
+        resolved = {"pattern": "ordinal", "start": start, "end": max(start, end), "of": total}
+        if floor:
+            resolved["floor"] = floor
+        if end <= start:
+            return Read(value=[], read_hash=canonical_hash([]), resolved={**resolved, "count": 0})
+        if start < floor:
+            return Read(lost=f"elements [{start}, {floor}) were released (the floor is {floor})")
+        value = data[start - floor : end - floor]
+        return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "count": len(value)})
     raise ValueError(f"unknown access pattern {pattern!r}")
+
+
+def _resolve_bound(expr: Any, window: Optional[TimeRange], head: Optional[int]) -> int:
+    return resolve_time_expr(expr, window, head)
+
+
+def _resolve_position(expr: Any, total: int, position: Optional[int]) -> int:
+    if isinstance(expr, FromHead):
+        return total + expr.offset
+    if isinstance(expr, Index):
+        return expr.index
+    if isinstance(expr, FromSelf):
+        if position is None:
+            raise ValueError("this read is relative to the reader's position: give the node params {'position': n}")
+        return int(position) + expr.offset
+    raise TypeError(f"unhandled ordinal expression {type(expr).__name__}")
+
+
+def select(pattern: Any, data: Any, window: Optional[TimeRange]) -> Any:
+    """The value an access pattern takes from data (see `read`); raises
+    when the read cannot be served."""
+    r = read(pattern, data, window)
+    if r.lost is not None:
+        raise LookupError(r.lost)
+    if r.waiting is not None:
+        raise LookupError(r.waiting)
+    return r.value
 
 
 def _window_from(params: Mapping[str, Any]) -> Optional[TimeRange]:
@@ -441,6 +530,9 @@ class Generator:
         resolved: List[ResolvedInput] = []
         lost: List[str] = []
         omitted: List[str] = []
+        causes: List[str] = []
+        reads: Dict[str, Dict[str, Any]] = {}  # ref -> how a relative or windowed read resolved, for the receipt
+        position = params.get("position")
         for e in cur.edges:
             if e.role in (RECIPE_ROLE, PARAMS_ROLE):
                 continue
@@ -460,7 +552,22 @@ class Generator:
                 else:
                     lost.append(ref)
                 continue
-            inputs[e.role or e.target] = select(e.pattern, tgt.data, window)
+            r = read(e.pattern, tgt.data, window, position, tgt.kind)
+            if r.waiting is not None:
+                if e.optional:
+                    omitted.append(ref)
+                    continue
+                return Generation(scope=scope, node_id=node_id, outcome="pending", note=f"waiting on {ref}: {r.waiting}", inputs=tuple(resolved))
+            if r.lost is not None:
+                if e.optional:
+                    omitted.append(ref)
+                else:
+                    lost.append(ref)
+                    causes.append(f"{ref}: {r.lost}")
+                continue
+            inputs[e.role or e.target] = r.value
+            if r.resolved is not None:
+                reads[ref] = r.resolved
             resolved.append(
                 ResolvedInput(
                     role=e.role or e.target,
@@ -468,15 +575,16 @@ class Generator:
                     name=e.target,
                     content_hash=tgt.content_hash(),
                     pattern=e.pattern.model_dump(mode="json"),
+                    read_hash=r.read_hash,
                 )
             )
         if lost:
-            return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(dict.fromkeys(lost)), inputs=tuple(resolved))
+            return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(dict.fromkeys(lost)), inputs=tuple(resolved), note="; ".join(causes))
 
         cache_key = canonical_hash(
             {
                 "declaration": declaration_hash(cur) if isinstance(cur, Node) else canonical_hash({"kind": cur.kind, "edges": [e.model_dump(mode="json") for e in cur.edges]}),
-                "inputs": sorted((r.role, r.scope, r.name, r.content_hash, canonical_hash(r.pattern)) for r in resolved),
+                "inputs": sorted((r.role, r.scope, r.name, r.read_hash or r.content_hash, canonical_hash(r.pattern)) for r in resolved),
                 "realization": used,
                 "params": params,
             }
@@ -554,6 +662,8 @@ class Generator:
             recipe_record["route"] = route
         if omitted:
             recipe_record["omitted"] = list(omitted)
+        if reads:
+            recipe_record["reads"] = reads
         if attempts > 1:
             recipe_record["attempts"] = attempts
         if self.plan_hash is not None:
@@ -641,10 +751,12 @@ __all__ = [
     "PARAMS_ROLE",
     "RECIPE_ROLE",
     "RECIPE_TEMPLATE_KIND",
+    "Read",
     "Realization",
     "ResolvedInput",
     "Routed",
     "router_realization",
     "declaration_hash",
+    "read",
     "select",
 ]

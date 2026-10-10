@@ -30,9 +30,11 @@ the run after it covers them all.
 
 Not handled here: settling (IIR) nodes, which need warm-up resurrection
 (REFERENCE-MODEL §17); triggering by access-pattern window rather than by
-name (an append to a strip outside a reader's window still triggers a run,
-and today the reader's cache key covers the whole strip, so it recooks);
-scheduling by time (a reactor reacts to changes, not to a clock).
+name (an append to a strip outside a reader's window still runs the
+targets, and the run is a cache hit because the cache key covers what was
+read); scheduling by time (a reactor reacts to changes, not to a clock).
+A read waiting for an element that does not exist yet is pending, and the
+element's arrival produces it.
 """
 
 from __future__ import annotations

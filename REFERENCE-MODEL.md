@@ -231,6 +231,26 @@ needed it). `SelfPrevious` still ships bundled with its keep-last-K
 retention floor (§17, PR-r15): a relative read into pruned history is the
 O(N²) rebuild, so the shape and the floor arrive together.
 
+**Shipped 2026-10-10 — the relative forms and their floor** (founder: "live
+observation like keyhole never works without relative relationships";
+vault ADR-0037; `core/strip_access.py`, `strip_resolve.py`,
+`strip_nodes.py`, `generation.read`). Time bounds may be `Ago(anchor,
+ms)`, looking back from the reader's window start or end or from the
+strip's *head* (the latest time any element reaches in the tested field,
+so a live window needs no clock). `OrdinalPattern(start, end)` slices by
+position with `FromHead(offset)`, `FromSelf(offset)` (the reader's
+`position` param), and `Index(i)`; `last(n)` and `previous(n)` build the
+common ones. Every offset is at most zero, so a forward reference cannot
+be written. Positions are absolute: a strip that releases old elements
+(`strip_trim`) keeps a *floor*, and a read that needs released elements is
+`lost` with the floor named (an `All` read always, a slice or window that
+starts below it); a read that ends past the head is `pending` until the
+element arrives. The receipt records what each relative read resolved to
+(`recipe.reads`), and the cache key covers what a windowed or sliced read
+took, not the whole strip. Self-reference (`SelfPrevious`) remains
+deferred with settling nodes; what shipped is the cheap form of the floor
+that comes before any retention policy.
+
 ## 6. Generation
 
 Generation is one operation: **produce node X by running its recipe

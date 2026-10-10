@@ -79,6 +79,21 @@ adds the receipt consequence: probe provenance — which inputs, drawn from
 where — is a first-class receipt field, because "passed the published
 suite" is void as evidence against a realization tuned to the suite.
 
+## `boxing-bench/`
+
+Imports the store and the generator and asks what it costs to make every
+write a transform (vault ADR-0038). Runs in about twelve seconds:
+
+```bash
+cd spikes/boxing-bench
+python3 bench.py      # B1, B2
+```
+
+| | question | finding |
+|---|---|---|
+| B1 | does a commit refuse a dangling edge or a cycle? | **no**; both are accepted, and a cycle surfaces only when walked |
+| B2 | plain append against append-as-production | flat ~200 us against 2.0, 9.6, 34 ms at 10, 100, 300 elements; the growth is the generator revisiting the whole closure on every produce (22,800 visits for 150 appends, exactly n(n+1)+n) |
+
 ## `placement-bench/`
 
 Imports `core/placement.py` (PR-d2) and measures it on stenota's real

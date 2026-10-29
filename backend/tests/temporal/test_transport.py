@@ -18,7 +18,7 @@ import pytest
 
 from nodecules.core.disk import Corrupt, DiskBacking, load
 from nodecules.core.store import Edge, Node, Store, make_envelope
-from nodecules.core.transport import Peer, pull, serve
+from nodecules.core.transport import Peer, pull, serve, serve_root
 
 M = "meetings/standup"
 
@@ -67,7 +67,7 @@ def _old_server(backing):
             return super().do_POST()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Old)
-    httpd.backing = backing
+    httpd.route = lambda parts: (backing, parts)
     t = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     t.start()
     return Served(httpd, t)
@@ -394,3 +394,67 @@ def test_a_404_leaves_a_kept_alive_connection_usable(tmp_path, servers):
     second = conn.getresponse()
     assert second.status == 200 and M in json.loads(second.read())["heads"]
     conn.close()
+
+
+# --- a folder of stores on one port --------------------------------------------------
+
+
+@pytest.fixture
+def roots():
+    running = []
+
+    def start(root):
+        s = serve_root(root)
+        running.append(s)
+        return s
+
+    yield start
+    for s in running:
+        s.close()
+
+
+def test_a_root_server_lists_its_stores_and_serves_each_by_name(tmp_path, roots):
+    a = _source(tmp_path / "root", "ex-a")
+    b = Store()
+    _put(b, "only-in-b", {"v": 1})
+    b.attach(DiskBacking(tmp_path / "root" / "ex-b"))
+    (tmp_path / "root" / "notes").mkdir()  # not a store: no manifests/ inside
+    s = roots(tmp_path / "root")
+
+    assert Peer(s.url).stores() == ["ex-a", "ex-b"]
+    mine = Store()
+    pull(mine, Peer(f"{s.url}/ex-a"), author="me")
+    assert mine.current(M).content_hash() == a.current(M).content_hash()
+    other = Store()
+    pull(other, Peer(f"{s.url}/ex-b"), author="me")
+    assert other.current(M).content_hash() == b.current(M).content_hash()
+    assert not (tmp_path / "root" / "notes" / "manifests").exists()  # serving never makes a store
+
+
+def test_a_store_made_under_a_served_root_is_served_without_a_restart(tmp_path, roots):
+    (tmp_path / "root").mkdir()
+    s = roots(tmp_path / "root")
+    assert Peer(s.url).stores() == []
+    late = _source(tmp_path / "root", "late")
+    assert Peer(s.url).stores() == ["late"]
+    mine = Store()
+    pull(mine, Peer(f"{s.url}/late"), author="me")
+    assert mine.current(M).content_hash() == late.current(M).content_hash()
+
+
+def test_a_root_server_refuses_names_outside_the_root_and_non_stores(tmp_path, roots):
+    _source(tmp_path, "outside")  # a store beside the root, not under it
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "plain").mkdir()
+    s = roots(tmp_path / "root")
+    for path in ("/../outside/heads", "/%2E%2E%2Foutside/heads", "/..%2Foutside/heads", "/plain/heads", "/nope/heads", "/.hidden/heads"):
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(s.url + path)
+        assert e.value.code in (400, 404), path
+    assert Peer(f"{s.url}/plain").heads() == {}
+    assert not (tmp_path / "root" / "plain" / "manifests").exists()
+
+
+def test_a_single_store_server_has_no_listing(tmp_path, servers):
+    s = servers(DiskBacking(tmp_path / "one"))
+    assert Peer(s.url).stores() is None

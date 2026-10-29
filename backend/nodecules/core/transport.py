@@ -48,6 +48,14 @@ Endpoints:
                            anything in have, at most limit of them; missing are the ones
                            reached that cannot be served yet
 
+`serve_root(dir)` serves every store directory under `dir` on one port:
+`GET /` lists them (`{"stores": [name, ...]}`), and each answers the
+endpoints above under `/<name>/`, so `Peer("http://host:port/<name>")` is
+that store. A directory is a store when it has `manifests/` in it; a store
+made after the server started is served at once, and nothing outside the
+root, nothing hidden, and nothing that is not already a store is reachable
+or created.
+
 No clock here: the caller measures time (`handoff/transport.py` does).
 """
 
@@ -61,10 +69,11 @@ import re
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
-from .disk import Corrupt, decode_body, decode_manifest, decode_skeleton, encode_body, encode_manifest, encode_skeleton
+from .disk import Corrupt, DiskBacking, decode_body, decode_manifest, decode_skeleton, encode_body, encode_manifest, encode_skeleton
 from .replica import merge_head
 from .store import Backing, Edge, Manifest, Node, Store
 
@@ -72,6 +81,7 @@ HASH = re.compile(r"^[0-9a-f]{64}$")
 MAX_BATCH = 10_000  # hashes per /objects request, and the most manifests one /walk returns
 WALK_LIMIT = 1_000  # manifests per /walk response unless the caller asks otherwise
 HAVE_DEPTH = 64  # first-parent ancestors of each local head offered as `have`
+STORE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # a store under a served root: no hidden names, no ..
 MAX_REQUEST = 4 * 1024 * 1024  # bytes of request body the server reads
 
 
@@ -154,13 +164,23 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _route(self) -> Tuple[Optional[Backing], List[str]]:
+        """The backing this request is for and the rest of its path. A
+        single-store server is the backing itself; a root server takes the
+        first segment as a store name (None when there is no such store)."""
+        parts = [unquote(p) for p in self.path.split("?", 1)[0].strip("/").split("/")]
+        return self.server.route(parts)  # type: ignore[attr-defined]
+
     def do_GET(self) -> None:
-        backing: Backing = self.server.backing  # type: ignore[attr-defined]
-        parts = self.path.split("?", 1)[0].strip("/").split("/")
+        if self.path.split("?", 1)[0].strip("/") == "" and hasattr(self.server, "root"):
+            return self._send(200, {"stores": self.server.stores()})  # type: ignore[attr-defined]
+        backing, parts = self._route()
+        if backing is None:
+            return self._send(404, {"error": "no such store"})
         if parts == ["heads"]:
             return self._send(200, {"heads": backing.heads()})
         if len(parts) == 2 and parts[0] in _SINGLE:
-            h = unquote(parts[1])
+            h = parts[1]
             if not HASH.match(h):
                 return self._send(400, {"error": "not a content hash"})
             obj = _SINGLE[parts[0]](backing, h)
@@ -168,13 +188,15 @@ class _Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "no such endpoint"})
 
     def do_POST(self) -> None:
-        backing: Backing = self.server.backing  # type: ignore[attr-defined]
-        path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_REQUEST:
             self.close_connection = True  # the body stays unread, so this connection cannot carry another request
             return self._send(413, {"error": "request too large"})
         raw = self.rfile.read(length)  # read before any answer, so a kept-alive connection stays in step
+        backing, parts = self._route()
+        if backing is None:
+            return self._send(404, {"error": "no such store"})
+        path = "/" + "/".join(parts)
         if path not in ("/objects", "/walk"):
             return self._send(404, {"error": "no such endpoint"})
         try:
@@ -221,17 +243,61 @@ class Served:
         self._thread.join(timeout=5)
 
 
+class _OneStore(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, addr, backing: Backing) -> None:
+        super().__init__(addr, _Handler)
+        self.backing = backing
+
+    def route(self, parts: List[str]) -> Tuple[Optional[Backing], List[str]]:
+        return self.backing, parts
+
+
+class _RootOfStores(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, addr, root: Path) -> None:
+        super().__init__(addr, _Handler)
+        self.root = root
+        self._backings: Dict[str, DiskBacking] = {}
+        self._lock = threading.Lock()
+
+    def _is_store(self, name: str) -> bool:
+        return bool(STORE_NAME.match(name)) and (self.root / name / "manifests").is_dir()
+
+    def stores(self) -> List[str]:
+        return sorted(p.name for p in self.root.iterdir() if self._is_store(p.name)) if self.root.is_dir() else []
+
+    def route(self, parts: List[str]) -> Tuple[Optional[Backing], List[str]]:
+        name = parts[0] if parts else ""
+        if not self._is_store(name):
+            return None, []
+        with self._lock:
+            b = self._backings.get(name)
+            if b is None:
+                b = self._backings[name] = DiskBacking(self.root / name)
+        return b, parts[1:]
+
+
+def _start(httpd: ThreadingHTTPServer) -> Served:
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, name=f"transport:{httpd.server_address[1]}", daemon=True)
+    thread.start()
+    return Served(httpd, thread)
+
+
 def serve(backing: Backing, host: str = "127.0.0.1", port: int = 0) -> Served:
     """Serve a backing's read half on a thread. Loopback by default; a
     LAN address is a deliberate choice (there is no auth here). Reads go
     to the backing on every request, so a writer sharing the directory is
     seen at once."""
-    httpd = ThreadingHTTPServer((host, port), _Handler)
-    httpd.daemon_threads = True
-    httpd.backing = backing  # type: ignore[attr-defined]
-    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, name=f"transport:{httpd.server_address[1]}", daemon=True)
-    thread.start()
-    return Served(httpd, thread)
+    return _start(_OneStore((host, port), backing))
+
+
+def serve_root(root: str | Path, host: str = "127.0.0.1", port: int = 0) -> Served:
+    """Serve every store directory under `root`, each at `/<name>/`, and
+    list them at `/`. Loopback by default, as `serve`."""
+    return _start(_RootOfStores((host, port), Path(root)))
 
 
 # --- the client -----------------------------------------------------------------------
@@ -246,8 +312,9 @@ class Peer(Backing):
         u = urlparse(url)
         if u.scheme != "http" or not u.hostname:
             raise ValueError(f"expected http://host:port, got {url!r}")
-        self.url = url
+        self.url = url.rstrip("/")
         self._host, self._port = u.hostname, u.port or 80
+        self._prefix = u.path.rstrip("/")  # a store under a root server: http://host:port/<name>
         self._timeout = timeout
         self._conn: Optional[http.client.HTTPConnection] = None
         self.requests = 0
@@ -260,7 +327,7 @@ class Peer(Backing):
         for attempt in (0, 1):  # one retry: a kept-alive connection the server has since closed
             conn = self._conn or http.client.HTTPConnection(self._host, self._port, timeout=self._timeout)
             try:
-                conn.request(method, path, body=data, headers=headers)
+                conn.request(method, self._prefix + path, body=data, headers=headers)
                 resp = conn.getresponse()
                 raw = resp.read()
             except (http.client.HTTPException, OSError):
@@ -283,6 +350,11 @@ class Peer(Backing):
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def stores(self) -> Optional[List[str]]:
+        """The store names a root server lists; None from a single-store server."""
+        got = self._request("GET", "/")
+        return None if got is None else [n for n in got["stores"] if STORE_NAME.match(n)]
 
     # -- the read half of Backing --------------------------------------------------------
 
@@ -518,4 +590,4 @@ def pull(
     return report
 
 
-__all__ = ["HASH", "MAX_BATCH", "Peer", "PullReport", "Served", "TransportError", "pull", "serve"]
+__all__ = ["HASH", "MAX_BATCH", "Peer", "PullReport", "STORE_NAME", "Served", "TransportError", "pull", "serve", "serve_root"]

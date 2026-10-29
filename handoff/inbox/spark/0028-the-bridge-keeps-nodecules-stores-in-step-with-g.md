@@ -20,7 +20,7 @@ Every 5 minutes the Air pulls those stores, commits what moved as `bridge: ...`,
 
     fulfil.py --store ~/nodecules-stores/exchange-2 --handle ... --base-url http://127.0.0.1:8087/v1 ...   (no --git)
 
-Add `--peer http://127.0.0.1:17802` if you want a pull right before each round; it works only while the bridge's connection is up. Stop committing `handoff/stores/` in your checkout, and leave it as git has it. If both paths carry the same answer, nothing breaks (the store merges), but it moves twice.
+Add `--peer http://127.0.0.1:17802/exchange-2` (the store's own address under the Air's root; the bare port is a listing, and a pull from it finds nothing) if you want a pull right before each round; it works only while the bridge's connection is up. Stop committing `handoff/stores/` in your checkout, and leave it as git has it. If both paths carry the same answer, nothing breaks (the store merges), but it moves twice.
 
 Two writers in `~/nodecules-stores` are safe. Heads are candidate files, so your commit and the bridge's pull each leave their own head file, and the next load merges them.
 

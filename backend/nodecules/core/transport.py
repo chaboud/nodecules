@@ -360,7 +360,9 @@ class Peer(Backing):
 
     def heads(self) -> Dict[str, List[str]]:
         got = self._request("GET", "/heads")
-        return {} if got is None else got["heads"]
+        if got is None:  # every store answers /heads, so a 404 is the wrong address, said loudly
+            raise TransportError(f"{self.url} is not a store (no /heads); a root of stores serves each one at {self.url}/<name>")
+        return got["heads"]
 
     def get_manifest(self, content_hash: str) -> Optional[Manifest]:
         raw = self._request("GET", f"/manifest/{content_hash}")

@@ -18,7 +18,7 @@ import pytest
 
 from nodecules.core.disk import Corrupt, DiskBacking, load
 from nodecules.core.store import Edge, Node, Store, make_envelope
-from nodecules.core.transport import Peer, pull, serve, serve_root
+from nodecules.core.transport import Peer, TransportError, pull, serve, serve_root
 
 M = "meetings/standup"
 
@@ -451,10 +451,22 @@ def test_a_root_server_refuses_names_outside_the_root_and_non_stores(tmp_path, r
         with pytest.raises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(s.url + path)
         assert e.value.code in (400, 404), path
-    assert Peer(f"{s.url}/plain").heads() == {}
+    with pytest.raises(TransportError):
+        Peer(f"{s.url}/plain").heads()
     assert not (tmp_path / "root" / "plain" / "manifests").exists()
 
 
 def test_a_single_store_server_has_no_listing(tmp_path, servers):
     s = servers(DiskBacking(tmp_path / "one"))
     assert Peer(s.url).stores() is None
+
+
+def test_a_pull_from_a_root_of_stores_says_to_name_a_store(tmp_path, roots):
+    """A root's bare port is a listing, not a store: a pull from it fails
+    loudly instead of finding nothing (it caught mbp in note 0028)."""
+    _source(tmp_path / "root", "ex-a")
+    s = roots(tmp_path / "root")
+    mine = Store()
+    with pytest.raises(TransportError, match=r"/<name>"):
+        pull(mine, Peer(s.url), author="me")
+    assert M not in mine.scopes()

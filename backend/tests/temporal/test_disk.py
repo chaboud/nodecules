@@ -274,3 +274,47 @@ def test_a_store_attached_before_a_scopes_first_commit_writes_the_genesis_manife
     store.current("touched")
     assert any(p.exists() for p in (root / "manifests").glob("*.json") if "touched" in p.read_text()) or True
     assert not (root / "heads" / "touched").exists()
+
+
+def test_a_manifest_added_while_another_request_scans_heads_does_not_break_the_scan(tmp_path):
+    """Found by reading (mbp, note 0029) and reproduced: two /heads requests on
+    one served store, or a /heads while a manifest is written, iterated the
+    lineage index while another thread added to it, and the scan raised
+    "dictionary changed size during iteration" (3 of 3 stress runs, 3 to 5 s
+    each). Made deterministic here: the scan is paused after its first entry
+    while another thread writes a manifest. The writer must wait for the
+    scan, never land inside it."""
+    import threading
+
+    root = tmp_path / "store"
+    store = Store()
+    store.attach(DiskBacking(root))
+    for i in range(3):
+        tx = store.transaction("s", author="dev")
+        tx.put(Node(id=f"n{i}", kind="k", scope="s", data=i))
+        tx.commit()
+    backing = DiskBacking(root)
+    backing.heads()  # warm the index from disk
+
+    other = Store()
+    tx = other.transaction("t", author="dev")
+    tx.put(Node(id="x", kind="k", scope="t", data=1))
+    extra = tx.commit()
+    inserted = threading.Event()
+
+    def write_from_another_thread():
+        backing.put_manifest(extra)
+        inserted.set()
+
+    class PausingIndex(dict):
+        def items(self):
+            it = iter(dict.items(self))
+            yield next(it)
+            threading.Thread(target=write_from_another_thread).start()
+            inserted.wait(0.3)  # without the lock the write lands here, mid-iteration
+            yield from it
+
+    backing._lineage = PausingIndex(backing._lineage)
+    heads = backing.heads()  # must not raise
+    assert "s" in heads
+    assert inserted.wait(5) and extra.content_hash() in backing._lineage  # the write still happened, after

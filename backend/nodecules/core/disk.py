@@ -29,6 +29,7 @@ already has content writes that content through first.
 from __future__ import annotations
 
 import json
+import threading
 import os
 import warnings
 from pathlib import Path
@@ -122,6 +123,9 @@ class DiskBacking(Backing):
         for sub in ("bodies", "skeletons", "manifests", "heads"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
         self._lineage: Dict[str, Tuple[str, Optional[str], Optional[str]]] = {}  # manifest hash -> (scope, parent, merge_parent)
+        # A served store answers requests on several threads: writes to the
+        # index and the scan's snapshot of it take this lock (note 0029).
+        self._lineage_lock = threading.Lock()
 
     # -- bodies ----------------------------------------------------------------------
 
@@ -164,7 +168,8 @@ class DiskBacking(Backing):
 
     def put_manifest(self, manifest: Manifest) -> None:
         h = manifest.content_hash()
-        self._lineage.setdefault(h, (manifest.scope, manifest.parent, manifest.merge_parent))
+        with self._lineage_lock:
+            self._lineage.setdefault(h, (manifest.scope, manifest.parent, manifest.merge_parent))
         p = self._manifest_path(h)
         if p.exists():
             return
@@ -246,15 +251,23 @@ class DiskBacking(Backing):
         # reads only files it has not seen. On a store of a thousand manifests
         # the scan cost 33 ms per call before this (mbp, note 0018); a listing
         # is about a millisecond.
+        # The files are read outside the lock; the index is updated and
+        # snapshotted under it, so a manifest written by another thread
+        # mid-scan waits rather than changing the index under the iteration.
         seen = self._lineage
+        found: Dict[str, Tuple[str, Optional[str], Optional[str]]] = {}
         for p in (self.root / "manifests").glob("*.json"):
             if p.stem in seen:
                 continue
             raw = _read(p)
             if raw is not None:
-                seen[p.stem] = (raw.get("scope", ""), raw.get("parent"), raw.get("merge_parent"))
+                found[p.stem] = (raw.get("scope", ""), raw.get("parent"), raw.get("merge_parent"))
+        with self._lineage_lock:
+            for h, entry in found.items():
+                seen.setdefault(h, entry)
+            known = list(seen.items())
         by_scope: Dict[str, Dict[str, Tuple[Optional[str], Optional[str]]]] = {}
-        for h, (scope, parent, merge_parent) in seen.items():
+        for h, (scope, parent, merge_parent) in known:
             by_scope.setdefault(scope, {})[h] = (parent, merge_parent)
         for scope, lineage in sorted(by_scope.items()):
             if scope in out:

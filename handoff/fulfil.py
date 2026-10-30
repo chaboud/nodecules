@@ -25,6 +25,11 @@ envelope names who fulfilled it. Back on the cloud side the next
     --peer URL                 pull the store from a transport server before each round
                                (handoff/transport.py); the requester pulls the answers back
                                from yours, so nothing is pushed
+    --ready URL                before each round, URL must answer 2xx (repeatable)
+    --ready-cmd CMD            before each round, CMD must exit 0 (repeatable)
+                               A round whose checks fail fulfils nothing and says which
+                               failed; alone it exits 3, under --loop it tries next cycle.
+                               For a model server something else restarts (note 0027).
 
 Nothing here is core: the store's merge rules (content-addressed files,
 one head file per candidate, merged on attach) are what make a git
@@ -42,6 +47,8 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -104,6 +111,29 @@ def repo_of(store: Path) -> Optional[Path]:
         return Path(top) if top else None
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
+
+
+def not_ready(a: argparse.Namespace) -> Optional[str]:
+    """The first readiness check that fails, in words, or None when all pass.
+    A check never retries or waits: the loop's own cadence is the retry."""
+    for url in a.ready or []:
+        try:
+            with urllib.request.urlopen(url, timeout=a.ready_timeout) as resp:  # noqa: S310 - the operator's own endpoint
+                code = resp.status
+        except urllib.error.HTTPError as e:
+            return f"{url} answered {e.code}"
+        except (urllib.error.URLError, OSError) as e:
+            return f"{url} did not answer ({getattr(e, 'reason', e)})"
+        if not 200 <= code < 300:
+            return f"{url} answered {code}"
+    for cmd in a.ready_cmd or []:
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=a.ready_timeout)
+        except subprocess.TimeoutExpired:
+            return f"`{cmd}` did not finish in {a.ready_timeout:g} s"
+        if r.returncode != 0:
+            return f"`{cmd}` exited {r.returncode}"
+    return None
 
 
 async def round_once(a: argparse.Namespace, realizations: List[Realization]) -> int:
@@ -173,6 +203,7 @@ async def main(a: argparse.Namespace) -> int:
     if a.git and repo is None:
         raise SystemExit("--git needs the store inside a git checkout")
     peer = Peer(a.peer) if a.peer else None
+    said: Optional[str] = None  # the readiness state last printed, so a loop says each change once
     while True:
         if repo is not None:
             r = git(repo, "pull", "--rebase", "-q", check=False)
@@ -182,6 +213,18 @@ async def main(a: argparse.Namespace) -> int:
             rep = pull(load(a.store), peer, scopes=a.scope, author=a.by)
             waiting = sum(len(v) for v in rep.retry.values())
             print(f"pulled from {peer.url}: {rep.manifests} manifests, {rep.bodies} bodies, retry {waiting}")
+        why = None if a.dry_run else not_ready(a)
+        if why is not None:
+            if why != said or not a.loop:
+                print(f"round skipped, not ready: {why}")
+            said = why
+            if not a.loop:
+                return 3
+            time.sleep(a.loop)
+            continue
+        if said is not None:
+            print("ready again")
+            said = None
         n = await round_once(a, realizations)
         print(f"round: {n} request(s) {'listed' if a.dry_run else 'fulfilled'} in {a.store}")
         if repo is not None and n and not a.dry_run:
@@ -210,6 +253,9 @@ if __name__ == "__main__":
     ap.add_argument("--loop", type=float, default=0.0, metavar="SECS")
     ap.add_argument("--git", action="store_true")
     ap.add_argument("--peer", help="http://host:port of a transport server to pull the store from first")
+    ap.add_argument("--ready", action="append", metavar="URL", help="must answer 2xx before a round (repeatable)")
+    ap.add_argument("--ready-cmd", action="append", metavar="CMD", help="must exit 0 before a round (repeatable)")
+    ap.add_argument("--ready-timeout", type=float, default=5.0, metavar="SECS")
     args = ap.parse_args()
     if not args.handle:
         args.handle = ["llm.spark@1"]

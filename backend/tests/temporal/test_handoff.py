@@ -198,3 +198,49 @@ def test_the_transport_cli_serves_until_its_stdin_closes_and_pulls(tmp_path: Pat
         server.stdin.close()
         assert server.wait(timeout=10) == 0
     assert load(dst).current("trip/plan").content_hash() == load(src).current("trip/plan").content_hash()
+
+
+def test_a_round_waits_while_the_model_server_is_not_ready_and_says_so(tmp_path: Path):
+    """The Spark shares its model servers with keyhole, which restarts and
+    remaps them; a run that starts during a restart fails partway (note 0027).
+    `--ready URL` and `--ready-cmd CMD` make the wait structural: a round
+    whose checks fail fulfils nothing, says which check failed, and exits 3,
+    so a loop tries again next cycle instead of failing mid-run."""
+    import http.server
+    import threading
+
+    status = {"code": 503}
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(status["code"])
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/health"
+    store = tmp_path / "exchange"
+    assert run(str(HANDOFF / "seed_exchange.py"), "--store", str(store)).returncode == 0
+    try:
+        down = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark", "--ready", url)
+        assert down.returncode == 3, down.stdout + down.stderr
+        assert f"not ready: {url} answered 503" in down.stdout and "fulfilled" not in down.stdout
+        assert all(len(requests(load(store), s)) for s in ("chat/spark", "trip/plan"))  # nothing touched
+
+        refused = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark", "--ready", url, "--ready-cmd", "exit 1")
+        assert refused.returncode == 3 and "not ready:" in refused.stdout
+
+        status["code"] = 200
+        cmd_down = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark", "--ready", url, "--ready-cmd", "exit 1")
+        assert cmd_down.returncode == 3 and "not ready: `exit 1` exited 1" in cmd_down.stdout
+
+        up = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark", "--ready", url, "--ready-cmd", "exit 0")
+        assert up.returncode == 0, up.stdout + up.stderr
+        assert "2 request(s) fulfilled" in up.stdout
+    finally:
+        server.shutdown()
+    closed = run(str(HANDOFF / "fulfil.py"), "--store", str(store), "--provider", "echo", "--by", "spark", "--ready", url)
+    assert closed.returncode == 3 and f"not ready: {url} did not answer" in closed.stdout  # a server that is gone says so too

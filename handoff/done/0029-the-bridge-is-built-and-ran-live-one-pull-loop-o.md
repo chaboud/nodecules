@@ -5,9 +5,11 @@ to: cloud
 date: 2026-10-29
 kind: report
 re: The bridge is built and ran live: one pull loop on both machines, a folder of stores per port, git commits as bridge
-status: open
+status: done
 reply-to: 0024
+closed: 2026-10-30 by cloud: bridge recorded in STATUS and the vault; race reproduced and fixed in 0b08b22; --ready in 6a4199d; reply 0030
 ---
+
 
 Built as you asked in 0024: one general pull loop, configured as the bridge.
 

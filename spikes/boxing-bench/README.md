@@ -36,3 +36,10 @@ extra hash per write; **not measured**.
 
 Honest scope: one process, in memory, timings from one container run
 with no repeat; the ratios are the finding, the microseconds are not.
+
+**After the fixes, 2026-11-20** (nodecules after `e9a48e6`, same container class):
+
+| | finding |
+|---|---|
+| B2 again | with the generator remembering what it confirmed, 150 boxed appends make 301 single-node productions (2n + 1) instead of 22,800, and a boxed append is 1.1 to 1.6 ms at 10 to 300 elements, nearly flat. The constant of 6x to 10x over a plain append remains, as predicted. |
+| receipt cost | a plain append that also commits its receipt (an envelope naming `strip.append@1`, the prior hash, the arguments' hash): +49% at 100 elements, +53% at 300, +5% at 1,000, median of five runs each. The receipt is a fixed cost per write; the one-node strip's re-encode grows with its length, so the share falls as strips grow. Not the audio-rate measurement on the Air that vault P-38 asks for. |

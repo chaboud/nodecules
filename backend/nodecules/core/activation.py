@@ -43,9 +43,9 @@ def mark(store: Store, scope: str, label: str, manifest: Optional[Manifest] = No
     target = manifest if manifest is not None else store.current(scope)
     if store.manifest(target.content_hash()) is None:
         raise ValueError("cannot mark a manifest the store does not know")
-    tx = store.transaction(scope, author=author)
-    tx.put(Node(id=marker_id(label), kind=MARKER_KIND, scope=scope, data={"label": label, "manifest": target.content_hash(), "seq": target.seq, "note": note}))
-    return tx.commit(note=f"mark {label} -> seq {target.seq}")
+    from .transforms import put_value
+
+    return put_value(store, scope, marker_id(label), MARKER_KIND, {"label": label, "manifest": target.content_hash(), "seq": target.seq, "note": note}, author=author, note=f"mark {label} -> seq {target.seq}")
 
 
 def marks(store: Store, manifest: Manifest) -> Dict[str, str]:

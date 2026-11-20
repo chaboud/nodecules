@@ -217,6 +217,7 @@ def make_envelope(
     inputs: Mapping[str, str],
     cooked_at_ms: Optional[int] = None,
     state: str = "dry",
+    content_hash: Optional[str] = None,
     **receipt: Any,
 ) -> Node:
     """Build the envelope for `node`: a distinct node that names the content,
@@ -226,7 +227,7 @@ def make_envelope(
     `measured`, …) are the receipt of production and are stored as given."""
     data: Dict[str, Any] = {
         "of": node.id,
-        "content_hash": node.content_hash(),
+        "content_hash": content_hash if content_hash is not None else node.content_hash(),
         "recipe": dict(recipe),
         "inputs": dict(inputs),
         "state": state,
@@ -448,6 +449,7 @@ class Store:
         # commit a cycle on purpose and catch it when walked, and the repo's
         # first invariant keeps them passing until the founder rules on it.
         self.refuse_cycles = refuse_cycles
+        self.pruned = 0  # bodies released by prune(); a change no manifest shows
         self._blobs: Dict[str, Node] = {}
         self._skeletons: Dict[str, Tuple[str, Tuple[Edge, ...]]] = {}
         self._residency: Dict[str, Residency] = {}
@@ -773,6 +775,7 @@ class Store:
         if self._backing is not None and self._backing.has_body(content_hash):
             self._backing.delete_body(content_hash)
         self._residency[content_hash] = "pruned"
+        self.pruned += 1  # anything remembering what it confirmed must look again
 
     def restore(self, node: Node) -> str:
         """Re-admit bytes for a pruned identity. Whether they came from a

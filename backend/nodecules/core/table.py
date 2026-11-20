@@ -42,6 +42,7 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 from pydantic import BaseModel, ConfigDict, Field
 
 from .scene import Element, Frame, element_of, frame, renewed
+from .transforms import put_value
 from .store import Manifest, Node, Store, register_merge
 
 PRESENCE_REGION = "presence"
@@ -93,9 +94,7 @@ class View(BaseModel):
 
 
 def join(store: Store, table: str, p: Participant, *, author: str = "") -> Manifest:
-    tx = store.transaction(table, author=author or p.id)
-    tx.put(Node(id=participant_id(p.id), kind=PARTICIPANT_KIND, scope=table, data=p.model_dump()))
-    return tx.commit(note=f"{p.id} joins")
+    return put_value(store, table, participant_id(p.id), PARTICIPANT_KIND, p.model_dump(), author=author or p.id, note=f"{p.id} joins")
 
 
 def participants(store: Store, manifest: Manifest) -> Tuple[Participant, ...]:
@@ -133,9 +132,7 @@ def attend(
         region=PRESENCE_REGION,
         payload={"participant": me, "focus": focus.model_dump() if focus else None, "following": following},
     )
-    tx = store.transaction(table, author=me)
-    tx.put(Node(id=attention_id(me), kind=ATTENTION_KIND, scope=table, data=el.model_dump()))
-    return tx.commit(note=f"{me} attends")
+    return put_value(store, table, attention_id(me), ATTENTION_KIND, el.model_dump(), author=me, note=f"{me} attends")
 
 
 def renew(store: Store, table: str, me: str, *, until: int) -> Manifest:
@@ -143,9 +140,8 @@ def renew(store: Store, table: str, me: str, *, until: int) -> Manifest:
     cur = store.get(store.current(table), attention_id(me))
     if not isinstance(cur, Node):
         raise ValueError(f"{me} has no attention to renew")
-    tx = store.transaction(table, author=me)
-    tx.put(renewed(cur, until))
-    return tx.commit(note=f"{me} renews")
+    nxt = renewed(cur, until)
+    return put_value(store, table, nxt.id, nxt.kind, nxt.data, author=me, note=f"{me} renews")
 
 
 def follow(store: Store, table: str, me: str, them: Optional[str], *, now: int, ttl: int) -> Manifest:

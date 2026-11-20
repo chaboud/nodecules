@@ -527,6 +527,15 @@ class Generator:
         # one cook instead of racing (REFERENCE-MODEL §22: one producer per node).
         self._inflight: Dict[Tuple[str, str], "asyncio.Task[Generation]"] = {}
         self._limits: Dict[Tuple[str, int], asyncio.Semaphore] = {}  # (handle, loop id) -> its concurrency cap
+        # What this generator has confirmed, so a later call does not revisit a
+        # whole chain to re-confirm it (spikes/boxing-bench B2: 150 appends as
+        # productions made 22,800 single-node productions). An entry stays good
+        # until a commit changes the node or anything it reads; the next call
+        # diffs each scope it has seen and drops the entries the change reaches.
+        self._memo: Dict[Tuple[str, str], Generation] = {}
+        self._dependents: Dict[Tuple[str, str], Set[Tuple[str, str]]] = {}  # input -> the memoized nodes that read it
+        self._seen: Dict[str, Manifest] = {}  # scope -> the manifest the memo was last brought up to date with
+        self._pruned_seen = getattr(store, "pruned", 0)
 
     # -- public --------------------------------------------------------------------
 
@@ -555,6 +564,7 @@ class Generator:
         productions are allowed to finish first, so nothing is left running
         unobserved."""
         wanted = [(sc, nid) for sc, nid in targets]
+        self._sync_memo()
         order: List[Tuple[str, str]] = []
         placed: Set[Tuple[str, str]] = set()
         for sc, nid in wanted:
@@ -593,13 +603,67 @@ class Generator:
 
     async def _produce_after(self, key: Tuple[str, str], deps: List[Tuple[Tuple[str, str], "asyncio.Task[Generation]"]]) -> Generation:
         problems: Dict[str, Generation] = {}  # ref -> the lost, failed, or pending input, so consumers carry the root cause
+        remembered = self._memo.get(key)
+        if remembered is not None:
+            self._track(remembered)
+            return remembered
         for (dsc, dnid), task in deps:
             g = await task
             if g.outcome in ("failed", "lost", "pending"):
                 problems[f"{dsc}:{dnid}"] = g
         result = await self._produce_one(key[0], key[1], problems)
         self._track(result)
+        self._remember(key, result)
         return result
+
+    # -- the memo of what is confirmed -----------------------------------------------
+
+    def _remember(self, key: Tuple[str, str], g: Generation) -> None:
+        if g.outcome not in ("exact", "via-substitute", "equivalent") or g.node is None:
+            return
+        node = self.store.get(self.store.current(key[0]), key[1])
+        if not isinstance(node, Node) or node.content_hash() != g.node.content_hash():
+            return
+        # Served again, it is what a second call would have found: a cache hit.
+        self._memo[key] = g.model_copy(update={"cache_hit": True, "cooked": False, "measured": g.measured, "attempts": 0}) if g.cooked else g
+        for sc in {key[0], *((e.scope or key[0]) for e in node.edges)}:
+            self._seen.setdefault(sc, self.store.current(sc))
+        for e in node.edges:
+            self._dependents.setdefault((e.scope or key[0], e.target), set()).add(key)
+
+    def _forget(self, key: Tuple[str, str]) -> None:
+        stack = [key]
+        while stack:
+            k = stack.pop()
+            self._memo.pop(k, None)
+            stack.extend(self._dependents.pop(k, ()))
+
+    def _sync_memo(self) -> None:
+        """Bring the memo up to date with every commit since it was last
+        looked at: a changed name drops itself and everything that reads it,
+        unless the change is the very node the memo already holds."""
+        if not self._memo:
+            self._seen.clear()
+            return
+        if getattr(self.store, "pruned", 0) != self._pruned_seen:
+            # A body released moves no manifest; start over rather than guess
+            # which confirmations it reaches.
+            self._memo.clear()
+            self._dependents.clear()
+            self._seen.clear()
+            self._pruned_seen = getattr(self.store, "pruned", 0)
+            return
+        for scope, seen in list(self._seen.items()):
+            live = self.store.current(scope)
+            if live is seen:
+                continue
+            for name in self.store.diff(seen, live).keys:
+                key = (scope, name)
+                held = self._memo.get(key)
+                if held is not None and held.node is not None and live.hash_of(name) == held.node.content_hash():
+                    continue  # our own write: the memo already holds it
+                self._forget(key)
+            self._seen[scope] = live
 
     def _limit(self, realization: Realization) -> Optional[asyncio.Semaphore]:
         if realization.concurrency is None:
@@ -658,6 +722,8 @@ class Generator:
         that has a recipe is produced after its inputs. Iterative; a strip
         is an unbounded chain."""
         root = (scope, node_id)
+        if root in self._memo:
+            return [root]
         order: List[Tuple[str, str]] = []
         seen: Set[Tuple[str, str]] = set()
         on_path: Set[Tuple[str, str]] = set()
@@ -677,6 +743,10 @@ class Generator:
                 for e in edges:
                     child = (e.scope or sc, e.target)
                     if child in seen:
+                        continue
+                    if child in self._memo:
+                        seen.add(child)  # confirmed earlier and unchanged since: a leaf here
+                        order.append(child)
                         continue
                     if child in on_path:
                         raise Cycle(f"{child[0]}:{child[1]} reaches itself")

@@ -97,9 +97,9 @@ def b2(sizes) -> None:
     prof.disable()
     stats = pstats.Stats(prof)
     calls = next(v[1] for k, v in stats.stats.items() if k[2] == "_produce_one")
-    print(f"    where it goes, n={n}: {calls} single-node productions for {n} appends "
-          f"(n(n+1) + n = {n * (n + 1) + n}): produce k revisits every earlier version, "
-          f"its element, and the recipe")
+    print(f"    single-node productions, n={n}: {calls} for {n} appends "
+          f"(n(n+1) + n = {n * (n + 1) + n} before the generator remembered what it confirmed; "
+          f"2n + 1 = {2 * n + 1} after)")
 
 
 if __name__ == "__main__":

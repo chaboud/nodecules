@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Tuple
 
 from .store import Manifest, Node, Store
+from .transforms import STRIP_APPEND, STRIP_CLOSE, STRIP_RELEASE, strip_data, write
 
 STRIP_KIND = "strip"
 
@@ -39,13 +40,13 @@ def strip_view(data: Any) -> Tuple[int, List[Any]]:
     a trimmed strip carries its floor."""
     if isinstance(data, list):
         return 0, data
-    if isinstance(data, dict) and "strip_floor" in data and isinstance(data.get("elements"), list):
-        return int(data["strip_floor"]), data["elements"]
+    if isinstance(data, dict) and isinstance(data.get("elements"), list) and ("strip_floor" in data or "strip_closed" in data):
+        return int(data.get("strip_floor", 0)), data["elements"]
     raise ValueError("not a strip")
 
 
 def _strip_data(floor: int, elements: List[Any]) -> Any:
-    return list(elements) if floor == 0 else {"strip_floor": floor, "elements": list(elements)}
+    return strip_data(floor, elements)
 
 
 def strip_read(store: Store, manifest: Manifest, name: str) -> List[Any]:
@@ -68,13 +69,11 @@ def strip_floor(store: Store, manifest: Manifest, name: str) -> int:
 
 
 def strip_append(store: Store, scope: str, name: str, *elements: Any, author: str = "") -> Manifest:
-    """Append elements to a strip in one commit, creating it if needed.
-    Old manifests still see the old strip; that is the point."""
-    tx = store.transaction(scope, author=author)
-    node = store.get(tx.base, name)
-    floor, current = (0, []) if not isinstance(node, Node) or node.data is None else strip_view(node.data)
-    tx.put(Node(id=name, kind=STRIP_KIND, scope=scope, data=_strip_data(floor, [*current, *elements])))
-    return tx.commit(note=f"append {len(elements)} to {name}")
+    """Append elements to a strip in one commit, creating it if needed. A
+    named transform (`strip.append@1`) with its receipt (vault ADR-0038). Old
+    manifests still see the old strip; that is the point. A closed strip
+    refuses (`transforms.WriteRefused`)."""
+    return write(store, scope, name, STRIP_APPEND.handle, {"elements": list(elements)}, author=author, note=f"append {len(elements)} to {name}")
 
 
 def strip_trim(store: Store, scope: str, name: str, *, keep_last: int, author: str = "") -> Manifest:
@@ -82,16 +81,30 @@ def strip_trim(store: Store, scope: str, name: str, *, keep_last: int, author: s
     Old manifests still see every element; the release is a new version."""
     if keep_last < 1:
         raise ValueError("keep_last must be at least 1; a strip with nothing retained has no head")
-    tx = store.transaction(scope, author=author)
-    node = store.get(tx.base, name)
+    base = store.current(scope)
+    node = store.get(base, name)
     if not isinstance(node, Node) or node.data is None:
         raise ValueError(f"{name!r} is not bound in {scope!r}")
     floor, current = strip_view(node.data)
     if len(current) <= keep_last:
-        return tx.base
+        return base
     released = len(current) - keep_last
-    tx.put(Node(id=name, kind=STRIP_KIND, scope=scope, data=_strip_data(floor + released, current[released:])))
-    return tx.commit(note=f"release {released} from {name} (floor {floor + released})")
+    return write(store, scope, name, STRIP_RELEASE.handle, {"released": released}, author=author, note=f"release {released} from {name} (floor {floor + released})")
+
+
+def strip_close(store: Store, scope: str, name: str, *, author: str = "") -> Manifest:
+    """Close a strip: nothing more will be appended, so a read past its end
+    is "ended", a fact, instead of pending forever (`strip.close@1`). A source
+    that comes back writes a new segment (vault ADR-0039)."""
+    node = store.get(store.current(scope), name)
+    if not isinstance(node, Node) or node.data is None:
+        raise ValueError(f"{name!r} is not bound in {scope!r}")
+    return write(store, scope, name, STRIP_CLOSE.handle, {}, author=author, note=f"close {name}")
+
+
+def strip_closed(store: Store, manifest: Manifest, name: str) -> bool:
+    node = store.get(manifest, name)
+    return isinstance(node, Node) and isinstance(node.data, dict) and bool(node.data.get("strip_closed"))
 
 
 def strip_len(store: Store, manifest: Manifest, name: str) -> int:
@@ -103,4 +116,4 @@ def strip_len(store: Store, manifest: Manifest, name: str) -> int:
     return floor + len(elements)
 
 
-__all__ = ["STRIP_KIND", "strip_append", "strip_floor", "strip_len", "strip_read", "strip_trim", "strip_view"]
+__all__ = ["STRIP_KIND", "strip_append", "strip_close", "strip_closed", "strip_floor", "strip_len", "strip_read", "strip_trim", "strip_view"]

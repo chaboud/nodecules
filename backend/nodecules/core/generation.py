@@ -285,6 +285,7 @@ def read(pattern: Any, data: Any, window: Optional[TimeRange], position: Optiona
     relative forms only look back. A read into released elements, past the
     end of a closed strip, or into a span nobody recorded misses for good and
     says why; a read of what does not exist yet misses as not-yet."""
+    meta = data if (kind == "strip" and isinstance(data, dict)) else {}
     floor, data, closed = _strip_state(data, kind)
     if isinstance(pattern, AllPattern):
         if floor:
@@ -296,12 +297,45 @@ def read(pattern: Any, data: Any, window: Optional[TimeRange], position: Optiona
     if isinstance(pattern, AtPattern):
         return _read_at(pattern, data, floor, closed, position)
     if isinstance(pattern, AtTimePattern):
-        return _read_at_time(pattern, data, floor, closed, window)
+        return _read_at_time(pattern, data, floor, closed, window, meta)
     if isinstance(pattern, RangePattern):
-        return _read_range(pattern, data, floor, closed, window)
+        return _read_range(pattern, data, floor, closed, window, meta)
     if isinstance(pattern, OrdinalPattern):
         return _read_ordinal(pattern, data, floor, closed, position)
     raise ValueError(f"unknown access pattern {pattern!r}")
+
+
+def _coverage(meta: Mapping[str, Any], field: str) -> Optional[List[Tuple[int, int]]]:
+    """The spans a strip was watching (vault ADR-0039), when it records them
+    for this field: a produced long strip over segments does."""
+    c = meta.get("coverage")
+    if not isinstance(c, list) or meta.get("coverage_field", field) != field:
+        return None
+    return [(int(a), int(b)) for a, b in c]
+
+
+def _uncovered(cov: List[Tuple[int, int]], a: int, b: int) -> List[List[int]]:
+    """Parts of [a, b) that no coverage span reaches."""
+    out: List[List[int]] = []
+    cur = a
+    for ca, cb in sorted(cov):
+        if cb <= cur:
+            continue
+        if ca >= b:
+            break
+        if ca > cur:
+            out.append([cur, min(ca, b)])
+        cur = max(cur, cb)
+        if cur >= b:
+            break
+    if cur < b:
+        out.append([cur, b])
+    return out
+
+
+def _away(meta: Mapping[str, Any]) -> Optional[int]:
+    v = meta.get("away_since_ms")
+    return int(v) if v is not None else None
 
 
 def _read_at(pattern: Any, data: Any, floor: int, closed: bool, position: Optional[int]) -> Read:
@@ -336,10 +370,12 @@ def _read_at(pattern: Any, data: Any, floor: int, closed: bool, position: Option
     return _miss(reason, message)
 
 
-def _read_at_time(pattern: Any, data: Any, floor: int, closed: bool, window: Optional[TimeRange]) -> Read:
+def _read_at_time(pattern: Any, data: Any, floor: int, closed: bool, window: Optional[TimeRange], meta: Optional[Mapping[str, Any]] = None) -> Read:
     if not isinstance(data, list):
         raise ValueError("an AtTime pattern reads a list of elements")
-    head = head_time(data, pattern.field)
+    meta = meta or {}
+    cov = _coverage(meta, pattern.field)
+    head = max(b for _, b in cov) if cov else head_time(data, pattern.field)
     if needs_head(pattern.time) and head is None:
         return _miss("ended" if closed else "not-yet", "no head: the strip has no element with this field")
     t = resolve_time_expr(pattern.time, window, head)
@@ -355,10 +391,22 @@ def _read_at_time(pattern: Any, data: Any, floor: int, closed: bool, window: Opt
         if best is None or key < best:
             best = key
     open_past_head = (not closed) and (head is None or t >= head)
-    if best is not None and best[0] == 0:
+    away = _away(meta)
+    if away is not None and needs_head(pattern.time):
+        # "Now" is not the end of what was watched while the source is away.
+        open_past_head = True
+    covered = cov is not None and any(a <= t < b for a, b in cov)
+    if best is not None and best[0] == 0 and not (away is not None and needs_head(pattern.time)):
         value = data[best[2]]
         return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "read": best[2] + floor})
-    if open_past_head:
+    if covered and not open_past_head:
+        # Watched, and nothing was there: a definite answer, not a miss.
+        return Read(value=None, read_hash=canonical_hash(None), resolved={**resolved, "read": None, "covered": True})
+    if away is not None and needs_head(pattern.time):
+        reason, message = "not-yet", f"the source has been away since {away}; now is not known"
+    elif cov is not None and head is not None and t < head and not covered:
+        reason, message = "gap", f"nothing was watching at {t}"
+    elif open_past_head:
         reason, message = "not-yet", f"nothing at {t} yet (the strip reaches {head})"
     elif head is not None and t >= head:
         reason, message = "ended", f"the strip ended at {head}"
@@ -375,10 +423,13 @@ def _read_at_time(pattern: Any, data: Any, floor: int, closed: bool, window: Opt
     return _miss(reason, message)
 
 
-def _read_range(pattern: Any, data: Any, floor: int, closed: bool, window: Optional[TimeRange]) -> Read:
+def _read_range(pattern: Any, data: Any, floor: int, closed: bool, window: Optional[TimeRange], meta: Optional[Mapping[str, Any]] = None) -> Read:
     if not isinstance(data, list):
         raise ValueError("a Range pattern reads a list of elements")
-    head = head_time(data, pattern.field) if (needs_head(pattern.start) or needs_head(pattern.end)) else None
+    meta = meta or {}
+    cov = _coverage(meta, pattern.field)
+    head_anchored = needs_head(pattern.start) or needs_head(pattern.end)
+    head = (max(b for _, b in cov) if cov else head_time(data, pattern.field)) if head_anchored else None
     if (needs_head(pattern.start) or needs_head(pattern.end)) and head is None:
         return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": None, "count": 0, "note": "no head: the strip has no element with this field"})
     start = _resolve_bound(pattern.start, window, head)
@@ -397,11 +448,26 @@ def _read_range(pattern: Any, data: Any, floor: int, closed: bool, window: Optio
             info["released_ms"] = short
     value = [el for el in data if range_matches(resolved, el)]
     info["count"] = len(value)
+    away = _away(meta)
+    if away is not None and head_anchored:
+        # The window is "the last N" of what was watched, and the source is
+        # away: the data is real, but it is not now.
+        if not nearest:
+            return _miss("not-yet", f"the source has been away since {away}; the last of what was watched is not now")
+        info["owed"] = f"the source has been away since {away}"
+        return Read(value=value, read_hash=canonical_hash(value), resolved=info, provisional=True, owed=info["owed"])
+    if cov is not None:
+        reach_cov = max(b for _, b in cov)
+        gaps = _uncovered(cov, resolved.window.start_ms, min(resolved.window.end_ms, reach_cov))
+        if gaps:
+            if not nearest:
+                return _miss("gap", f"nothing was watching in {gaps}")
+            info["gaps"] = gaps
     # A span that ends past what the strip has reached: exactly misses
     # (not-yet on an open strip, ended on a closed one); nearest returns what
     # is there, and on an open strip it is provisional. Before promises this
     # came back short with no signal.
-    reach = head_time(data, pattern.field)
+    reach = max(b for _, b in cov) if cov else head_time(data, pattern.field)
     if reach is None or resolved.window.end_ms > reach:
         missing = resolved.window.end_ms - (reach if reach is not None else resolved.window.start_ms)
         reached = "nothing yet" if reach is None else f"reaches {reach}"

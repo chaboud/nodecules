@@ -66,7 +66,7 @@ from .store import (
     envelope_id,
     make_envelope,
 )
-from .strip_access import AllPattern, FromHead, FromSelf, Index, LatestPattern, OrdinalPattern, RangePattern
+from .strip_access import AllPattern, AtPattern, AtTimePattern, FromHead, FromSelf, Index, LatestPattern, OrdinalPattern, RangePattern
 from .strip_resolve import earliest_time, head_time, needs_head, range_matches, resolve_range, resolve_time_expr
 from .time import TimeRange
 
@@ -175,6 +175,14 @@ class Generation(BaseModel):
     error: Optional[str] = None
     request: Optional[str] = None  # the request node written when the production was deferred
     note: str = ""
+    # Why a read missed (strip_access.Reason), when it did: "not-yet" with
+    # outcome pending, a final reason with outcome lost.
+    reason: Optional[str] = None
+    # Wet ink (ADR-0038): this version stands on a nearest hit that still owes
+    # the exact, here or upstream, and will be replaced when it lands. The
+    # names wet, drying, dry, smudged are the consumer's to give.
+    provisional: bool = False
+    owed: Tuple[str, ...] = ()
 
 
 def declaration_hash(node: Node) -> str:
@@ -184,79 +192,271 @@ def declaration_hash(node: Node) -> str:
 
 
 class Read:
-    """What one edge's pattern took from its target: the value, the hash of
-    what was read (None for a whole read), how the symbolic pattern resolved
-    (for the receipt), and why the read could not be served: `lost` when it
-    needs elements the strip released, `waiting` when it needs elements that
-    do not exist yet."""
+    """What one edge's pattern took from its target, and whether it kept the
+    read's promise (vault ADR-0038).
 
-    __slots__ = ("value", "read_hash", "resolved", "lost", "waiting")
+    A hit carries `value`, the hash of what was read (`read_hash`, None for
+    a whole read), and how the symbolic pattern resolved (`resolved`, for
+    the receipt). A nearest hit records its `distance` from what was asked,
+    and is `provisional` when the exact thing can still arrive, with `owed`
+    saying what is still owed.
 
-    def __init__(self, value: Any = None, read_hash: Optional[str] = None, resolved: Optional[Dict[str, Any]] = None, lost: Optional[str] = None, waiting: Optional[str] = None) -> None:
+    A miss carries a typed `reason` from strip_access.Reason and a message:
+    `waiting` for "not-yet" (the production is pending, and a reactor tries
+    again when the strip changes), `lost` for the reasons that are final."""
+
+    __slots__ = ("value", "read_hash", "resolved", "lost", "waiting", "reason", "provisional", "owed", "distance")
+
+    def __init__(
+        self,
+        value: Any = None,
+        read_hash: Optional[str] = None,
+        resolved: Optional[Dict[str, Any]] = None,
+        lost: Optional[str] = None,
+        waiting: Optional[str] = None,
+        reason: Optional[str] = None,
+        provisional: bool = False,
+        owed: Optional[str] = None,
+        distance: Optional[int] = None,
+    ) -> None:
         self.value = value
         self.read_hash = read_hash
         self.resolved = resolved
         self.lost = lost
         self.waiting = waiting
+        self.reason = reason if reason is not None else ("not-yet" if waiting is not None else ("released" if lost is not None else None))
+        self.provisional = provisional
+        self.owed = owed
+        self.distance = distance
+
+    @property
+    def missed(self) -> bool:
+        return self.lost is not None or self.waiting is not None
+
+
+def _miss(reason: str, message: str) -> Read:
+    if reason == "not-yet":
+        return Read(waiting=message, reason=reason)
+    return Read(lost=message, reason=reason)
+
+
+def _strip_state(data: Any, kind: Optional[str]) -> Tuple[int, Any, bool]:
+    """(floor, retained elements, closed) for a strip node's data."""
+    if kind == "strip" and isinstance(data, dict) and isinstance(data.get("elements"), list) and ("strip_floor" in data or "strip_closed" in data):
+        return int(data.get("strip_floor", 0)), data["elements"], bool(data.get("strip_closed", False))
+    return 0, data, False
 
 
 def _strip_view(data: Any, kind: Optional[str]) -> Tuple[int, Any]:
-    if kind == "strip" and isinstance(data, dict) and "strip_floor" in data and isinstance(data.get("elements"), list):
-        return int(data["strip_floor"]), data["elements"]
-    return 0, data
+    floor, elements, _closed = _strip_state(data, kind)
+    return floor, elements
+
+
+def _span_of(el: Any, field: str) -> Optional[Tuple[int, int]]:
+    from .strip_resolve import _field
+
+    try:
+        v = _field(el, field)
+    except AttributeError:
+        return None
+    ranges = v if isinstance(v, list) else [v]
+    starts, ends = [], []
+    for r in ranges:
+        try:
+            starts.append(int(_field(r, "start_ms")))
+            ends.append(int(_field(r, "end_ms")))
+        except AttributeError:
+            return None
+    if not starts:
+        return None
+    return min(starts), max(ends)
+
+
+def _within(distance: int, tolerance: Optional[int]) -> bool:
+    return tolerance is None or distance <= tolerance
 
 
 def read(pattern: Any, data: Any, window: Optional[TimeRange], position: Optional[int] = None, kind: Optional[str] = None) -> Read:
-    """Apply an edge's access pattern to its target's data. `All` is the whole
-    value; `Latest` the last element of a list (or the value); `Range` the
-    elements whose time field meets a window, the window relative to the
-    reader's or to the strip's head; `Ordinal` a slice by position, relative
-    to the head or to the reader's `position`. The relative forms only look
-    back, and a read into released elements is lost, never silently short."""
-    floor, data = _strip_view(data, kind)
+    """Apply an edge's access pattern to its target's data, keeping or missing
+    the pattern's promise. `All` is the whole value; `Latest` the last element
+    of a list (or the value); `Range` the elements whose time field meets a
+    window, relative to the reader's or to the strip's head; `Ordinal` a slice
+    by position; `At` and `AtTime` one element by position or by time. The
+    relative forms only look back. A read into released elements, past the
+    end of a closed strip, or into a span nobody recorded misses for good and
+    says why; a read of what does not exist yet misses as not-yet."""
+    floor, data, closed = _strip_state(data, kind)
     if isinstance(pattern, AllPattern):
         if floor:
-            return Read(lost=f"an All read needs every element, and elements [0, {floor}) were released; read a window (last(n), or a range) instead")
+            return _miss("released", f"an All read needs every element, and elements [0, {floor}) were released; read a window (last(n), or a range) instead")
         return Read(value=data)
     if isinstance(pattern, LatestPattern):
         value = data[-1] if isinstance(data, list) and data else data
         return Read(value=value, read_hash=canonical_hash(value))
+    if isinstance(pattern, AtPattern):
+        return _read_at(pattern, data, floor, closed, position)
+    if isinstance(pattern, AtTimePattern):
+        return _read_at_time(pattern, data, floor, closed, window)
     if isinstance(pattern, RangePattern):
-        if not isinstance(data, list):
-            raise ValueError("a Range pattern reads a list of elements")
-        head = head_time(data, pattern.field) if (needs_head(pattern.start) or needs_head(pattern.end)) else None
-        if (needs_head(pattern.start) or needs_head(pattern.end)) and head is None:
-            return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": None, "count": 0, "note": "no head: the strip has no element with this field"})
-        start = _resolve_bound(pattern.start, window, head)
-        end = _resolve_bound(pattern.end, window, head)
-        if end <= start:
-            return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": [start, end], "count": 0})
-        resolved = resolve_range(pattern, window, head)
-        if floor:
-            earliest = earliest_time(data, pattern.field)
-            if earliest is None or resolved.window.start_ms < earliest:
-                return Read(lost=f"the window starts at {resolved.window.start_ms}, before the earliest retained element ({earliest}); elements [0, {floor}) were released")
-        value = [el for el in data if range_matches(resolved, el)]
-        return Read(value=value, read_hash=canonical_hash(value), resolved={"pattern": "range", "field": pattern.field, "window": [resolved.window.start_ms, resolved.window.end_ms], "count": len(value)})
+        return _read_range(pattern, data, floor, closed, window)
     if isinstance(pattern, OrdinalPattern):
-        if not isinstance(data, list):
-            raise ValueError("an Ordinal pattern reads a list of elements")
-        total = floor + len(data)
-        start = _resolve_position(pattern.start, total, position)
-        end = _resolve_position(pattern.end, total, position)
-        if end > total:
-            return Read(waiting=f"element {end - 1} does not exist yet (the strip has {total})")
-        start = max(0, start)
-        resolved = {"pattern": "ordinal", "start": start, "end": max(start, end), "of": total}
-        if floor:
-            resolved["floor"] = floor
-        if end <= start:
-            return Read(value=[], read_hash=canonical_hash([]), resolved={**resolved, "count": 0})
-        if start < floor:
-            return Read(lost=f"elements [{start}, {floor}) were released (the floor is {floor})")
-        value = data[start - floor : end - floor]
-        return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "count": len(value)})
+        return _read_ordinal(pattern, data, floor, closed, position)
     raise ValueError(f"unknown access pattern {pattern!r}")
+
+
+def _read_at(pattern: Any, data: Any, floor: int, closed: bool, position: Optional[int]) -> Read:
+    if not isinstance(data, list):
+        raise ValueError("an At pattern reads a list of elements")
+    total = floor + len(data)
+    expr = pattern.position
+    want = (total - 1 + expr.offset) if isinstance(expr, FromHead) else _resolve_position(expr, total, position)
+    nearest = pattern.promise == "nearest"
+    resolved: Dict[str, Any] = {"pattern": "at", "asked": want, "of": total}
+    if floor:
+        resolved["floor"] = floor
+    if want < 0:
+        return _miss("gap", f"element {want} is before the strip's first element")
+    if floor <= want < total:
+        value = data[want - floor]
+        return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "read": want})
+    if want < floor:
+        if nearest and data and _within(floor - want, pattern.tolerance):
+            value = data[0]
+            return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "read": floor, "distance": floor - want}, distance=floor - want)
+        return _miss("released", f"element {want} was released (the floor is {floor})")
+    # want >= total: past the newest element
+    reason = "ended" if closed else "not-yet"
+    message = f"the strip ended at element {total - 1}" if closed else f"element {want} does not exist yet (the strip has {total})"
+    if nearest and data and _within(want - (total - 1), pattern.tolerance):
+        value = data[-1]
+        r = {**resolved, "read": total - 1, "distance": want - (total - 1)}
+        if not closed:
+            r["owed"] = f"element {want}"
+        return Read(value=value, read_hash=canonical_hash(value), resolved=r, provisional=not closed, owed=None if closed else f"element {want}", distance=want - (total - 1))
+    return _miss(reason, message)
+
+
+def _read_at_time(pattern: Any, data: Any, floor: int, closed: bool, window: Optional[TimeRange]) -> Read:
+    if not isinstance(data, list):
+        raise ValueError("an AtTime pattern reads a list of elements")
+    head = head_time(data, pattern.field)
+    if needs_head(pattern.time) and head is None:
+        return _miss("ended" if closed else "not-yet", "no head: the strip has no element with this field")
+    t = resolve_time_expr(pattern.time, window, head)
+    resolved: Dict[str, Any] = {"pattern": "at_time", "field": pattern.field, "asked": t}
+    best: Optional[Tuple[int, int, int]] = None  # (distance, start, index)
+    for i, el in enumerate(data):
+        span = _span_of(el, pattern.field)
+        if span is None:
+            continue
+        a, b = span
+        d = 0 if a <= t < b else (a - t if t < a else t - b + 1)
+        key = (d, a, i)
+        if best is None or key < best:
+            best = key
+    open_past_head = (not closed) and (head is None or t >= head)
+    if best is not None and best[0] == 0:
+        value = data[best[2]]
+        return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "read": best[2] + floor})
+    if open_past_head:
+        reason, message = "not-yet", f"nothing at {t} yet (the strip reaches {head})"
+    elif head is not None and t >= head:
+        reason, message = "ended", f"the strip ended at {head}"
+    elif floor:
+        reason, message = "released", f"{t} may be in elements [0, {floor}), which were released"
+    else:
+        reason, message = "gap", f"nothing was recorded at {t}"
+    if pattern.promise == "nearest" and best is not None and _within(best[0], pattern.tolerance):
+        value = data[best[2]]
+        r = {**resolved, "read": best[2] + floor, "distance": best[0]}
+        if open_past_head:
+            r["owed"] = f"an element at {t}"
+        return Read(value=value, read_hash=canonical_hash(value), resolved=r, provisional=open_past_head, owed=r.get("owed"), distance=best[0])
+    return _miss(reason, message)
+
+
+def _read_range(pattern: Any, data: Any, floor: int, closed: bool, window: Optional[TimeRange]) -> Read:
+    if not isinstance(data, list):
+        raise ValueError("a Range pattern reads a list of elements")
+    head = head_time(data, pattern.field) if (needs_head(pattern.start) or needs_head(pattern.end)) else None
+    if (needs_head(pattern.start) or needs_head(pattern.end)) and head is None:
+        return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": None, "count": 0, "note": "no head: the strip has no element with this field"})
+    start = _resolve_bound(pattern.start, window, head)
+    end = _resolve_bound(pattern.end, window, head)
+    if end <= start:
+        return Read(value=[], read_hash=canonical_hash([]), resolved={"pattern": "range", "field": pattern.field, "window": [start, end], "count": 0})
+    resolved = resolve_range(pattern, window, head)
+    nearest = pattern.promise == "nearest"
+    info: Dict[str, Any] = {"pattern": "range", "field": pattern.field, "window": [resolved.window.start_ms, resolved.window.end_ms]}
+    if floor:
+        earliest = earliest_time(data, pattern.field)
+        if earliest is None or resolved.window.start_ms < earliest:
+            short = (earliest - resolved.window.start_ms) if earliest is not None else None
+            if not (nearest and short is not None and _within(short, pattern.tolerance)):
+                return _miss("released", f"the window starts at {resolved.window.start_ms}, before the earliest retained element ({earliest}); elements [0, {floor}) were released")
+            info["released_ms"] = short
+    value = [el for el in data if range_matches(resolved, el)]
+    info["count"] = len(value)
+    # A span that ends past what the strip has reached: exactly misses
+    # (not-yet on an open strip, ended on a closed one); nearest returns what
+    # is there, and on an open strip it is provisional. Before promises this
+    # came back short with no signal.
+    reach = head_time(data, pattern.field)
+    if reach is None or resolved.window.end_ms > reach:
+        missing = resolved.window.end_ms - (reach if reach is not None else resolved.window.start_ms)
+        reached = "nothing yet" if reach is None else f"reaches {reach}"
+        if not nearest or not _within(missing, pattern.tolerance):
+            if closed:
+                return _miss("ended", f"the window ends at {resolved.window.end_ms}, after the strip ended ({reached})")
+            return _miss("not-yet", f"the window ends at {resolved.window.end_ms} and the strip {reached}")
+        info["short_ms"] = missing
+        if not closed:
+            info["owed"] = f"[{reach if reach is not None else resolved.window.start_ms}, {resolved.window.end_ms})"
+            return Read(value=value, read_hash=canonical_hash(value), resolved=info, provisional=True, owed=info["owed"], distance=missing)
+    return Read(value=value, read_hash=canonical_hash(value), resolved=info)
+
+
+def _read_ordinal(pattern: Any, data: Any, floor: int, closed: bool, position: Optional[int]) -> Read:
+    if not isinstance(data, list):
+        raise ValueError("an Ordinal pattern reads a list of elements")
+    total = floor + len(data)
+    start = _resolve_position(pattern.start, total, position)
+    end = _resolve_position(pattern.end, total, position)
+    nearest = pattern.promise == "nearest"
+    provisional = False
+    owed: Optional[str] = None
+    distance: Optional[int] = None
+    if end > total:
+        short = end - total
+        if not (nearest and _within(short, pattern.tolerance)):
+            if closed:
+                return _miss("ended", f"the strip ended at element {total - 1}")
+            return _miss("not-yet", f"element {end - 1} does not exist yet (the strip has {total})")
+        distance = short
+        if not closed:
+            provisional, owed = True, f"elements [{total}, {end})"
+        end = total
+    clipped = start < 0
+    start = max(0, start)
+    resolved: Dict[str, Any] = {"pattern": "ordinal", "start": start, "end": max(start, end), "of": total}
+    if clipped:
+        resolved["clipped"] = "before the strip's first element"
+    if floor:
+        resolved["floor"] = floor
+    if distance is not None:
+        resolved["distance"] = distance
+    if owed is not None:
+        resolved["owed"] = owed
+    if end <= start:
+        return Read(value=[], read_hash=canonical_hash([]), resolved={**resolved, "count": 0}, provisional=provisional, owed=owed, distance=distance)
+    if start < floor:
+        if not (nearest and _within(floor - start, pattern.tolerance)):
+            return _miss("released", f"elements [{start}, {floor}) were released (the floor is {floor})")
+        resolved["released"] = floor - start
+        start = floor
+        resolved["start"] = start
+    value = data[start - floor : end - floor]
+    return Read(value=value, read_hash=canonical_hash(value), resolved={**resolved, "count": len(value)}, provisional=provisional, owed=owed, distance=distance)
 
 
 def _resolve_bound(expr: Any, window: Optional[TimeRange], head: Optional[int]) -> int:
@@ -531,6 +731,9 @@ class Generator:
         lost: List[str] = []
         omitted: List[str] = []
         causes: List[str] = []
+        reasons: List[str] = []
+        owed: List[str] = []  # what nearest hits here, or provisional inputs upstream, still owe
+        substituted = False  # a nearest hit at a distance: the read was kept by a substitute
         reads: Dict[str, Dict[str, Any]] = {}  # ref -> how a relative or windowed read resolved, for the receipt
         position = params.get("position")
         for e in cur.edges:
@@ -557,17 +760,25 @@ class Generator:
                 if e.optional:
                     omitted.append(ref)
                     continue
-                return Generation(scope=scope, node_id=node_id, outcome="pending", note=f"waiting on {ref}: {r.waiting}", inputs=tuple(resolved))
+                return Generation(scope=scope, node_id=node_id, outcome="pending", note=f"waiting on {ref}: {r.waiting}", inputs=tuple(resolved), reason=r.reason)
             if r.lost is not None:
                 if e.optional:
                     omitted.append(ref)
                 else:
                     lost.append(ref)
                     causes.append(f"{ref}: {r.lost}")
+                    reasons.append(r.reason or "released")
                 continue
             inputs[e.role or e.target] = r.value
             if r.resolved is not None:
                 reads[ref] = r.resolved
+            if r.provisional:
+                owed.append(f"{ref}: {r.owed}")
+            if r.distance:
+                substituted = True
+            up_env = self.store.get(self.store.current(e.scope or scope), envelope_id(e.target))
+            if isinstance(up_env, Node) and isinstance(up_env.data, dict) and (up_env.data.get("recipe") or {}).get("owed"):
+                owed.append(f"{ref} is provisional")
             resolved.append(
                 ResolvedInput(
                     role=e.role or e.target,
@@ -579,7 +790,7 @@ class Generator:
                 )
             )
         if lost:
-            return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(dict.fromkeys(lost)), inputs=tuple(resolved), note="; ".join(causes))
+            return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(dict.fromkeys(lost)), inputs=tuple(resolved), note="; ".join(causes), reason=reasons[0] if reasons else None)
 
         cache_key = canonical_hash(
             {
@@ -609,6 +820,8 @@ class Generator:
                 realization=used,
                 declared_realization=declared,
                 inputs=tuple(resolved),
+                provisional=bool((prior.data.get("recipe") or {}).get("owed")),
+                owed=tuple((prior.data.get("recipe") or {}).get("owed") or ()),
             )
 
         attempts = 0
@@ -655,7 +868,7 @@ class Generator:
         else:
             measured = False
             reproducibility = "exact" if realization.deterministic else "equivalent"
-        outcome: Outcome = "via-substitute" if (used != declared or (route is not None and route["chose"] != route["primary"])) else "exact"
+        outcome: Outcome = "via-substitute" if (used != declared or substituted or (route is not None and route["chose"] != route["primary"])) else "exact"
 
         recipe_record: Dict[str, Any] = {"realization": used, "declared": declared, "params": params}
         if route is not None:
@@ -664,6 +877,8 @@ class Generator:
             recipe_record["omitted"] = list(omitted)
         if reads:
             recipe_record["reads"] = reads
+        if owed:
+            recipe_record["owed"] = list(dict.fromkeys(owed))
         if attempts > 1:
             recipe_record["attempts"] = attempts
         if self.plan_hash is not None:
@@ -715,6 +930,8 @@ class Generator:
             omitted=tuple(omitted),
             route=route,
             attempts=attempts,
+            provisional=bool(owed),
+            owed=tuple(dict.fromkeys(owed)),
         )
 
     def _defer(self, scope: str, node_id: str, used: str, declared: str, resolved: List[ResolvedInput], params: Dict[str, Any], cache_key: str, manifest: Manifest) -> Generation:

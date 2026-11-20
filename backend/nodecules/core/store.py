@@ -442,7 +442,12 @@ class Store:
     a reader needs is reachable from a manifest; everything a writer does
     goes through a `Transaction`."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, refuse_cycles: bool = False) -> None:
+        # Refuse, at commit, a node that would close a cycle within one
+        # snapshot (vault ADR-0038). Off by default for now: two existing tests
+        # commit a cycle on purpose and catch it when walked, and the repo's
+        # first invariant keeps them passing until the founder rules on it.
+        self.refuse_cycles = refuse_cycles
         self._blobs: Dict[str, Node] = {}
         self._skeletons: Dict[str, Tuple[str, Tuple[Edge, ...]]] = {}
         self._residency: Dict[str, Residency] = {}
@@ -813,6 +818,8 @@ class Store:
                 entries = entries.set(node_id, h)
             for node_id in tx.deletes:
                 entries = entries.delete(node_id)
+            if self.refuse_cycles:
+                self._check_references(tx.scope, entries, puts)
             manifest = Manifest.build(
                 tx.scope,
                 entries,
@@ -835,6 +842,57 @@ class Store:
             self._current[tx.scope] = manifest
         self._notify("commit", manifest)
         return manifest
+
+    def _check_references(self, scope: str, entries: PMap, puts: Dict[str, "Node"]) -> None:
+        """Refuse a commit that would bind a node closing a cycle within one
+        snapshot (vault ADR-0038: dependence is acyclic, and a reference may
+        only reach what exists or what a graph can produce). A reference
+        across generations, to an earlier version, reads what already exists
+        and is not a cycle. Checked from the nodes this commit writes, through
+        this commit's entries for its own scope and the live manifests of the
+        others; a name not bound anywhere here stops the walk."""
+        def hash_of(sc: str, name: str) -> Optional[str]:
+            if sc == scope:
+                return entries.get(name)
+            m = self._current.get(sc)
+            return m.hash_of(name) if m is not None else None
+
+        def edges_of(sc: str, name: str) -> Tuple["Edge", ...]:
+            if sc == scope and name in puts:
+                return puts[name].edges
+            h = hash_of(sc, name)
+            if h is None:
+                return ()
+            try:
+                return self._skeleton_of(h)[1]
+            except KeyError:
+                return ()
+
+        done: Set[Tuple[str, str]] = set()
+        for start in puts:
+            if (scope, start) in done:
+                continue
+            on_path: Set[Tuple[str, str]] = set()
+            stack: List[Tuple[Tuple[str, str], bool]] = [((scope, start), False)]
+            while stack:
+                key, expanded = stack.pop()
+                if expanded:
+                    on_path.discard(key)
+                    done.add(key)
+                    continue
+                if key in done:
+                    continue
+                on_path.add(key)
+                stack.append((key, True))
+                for e in edges_of(*key):
+                    child = (e.scope or key[0], e.target)
+                    if child in on_path:
+                        raise Cycle(
+                            f"{scope}:{start} would close a cycle through {child[0]}:{child[1]}; "
+                            "a node may read an earlier version of itself through a strip, never itself"
+                        )
+                    if child not in done and hash_of(*child) is not None:
+                        stack.append((child, False))
 
     def _fold(
         self,

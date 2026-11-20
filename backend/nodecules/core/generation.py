@@ -928,14 +928,17 @@ class Generator:
         if lost:
             return Generation(scope=scope, node_id=node_id, outcome="lost", lost=tuple(dict.fromkeys(lost)), inputs=tuple(resolved), note="; ".join(causes), reason=reasons[0] if reasons else None)
 
-        cache_key = canonical_hash(
-            {
-                "declaration": declaration_hash(cur) if isinstance(cur, Node) else canonical_hash({"kind": cur.kind, "edges": [e.model_dump(mode="json") for e in cur.edges]}),
-                "inputs": sorted((r.role, r.scope, r.name, r.read_hash or r.content_hash, canonical_hash(r.pattern)) for r in resolved),
-                "realization": used,
-                "params": params,
-            }
-        )
+        key_parts: Dict[str, Any] = {
+            "declaration": declaration_hash(cur) if isinstance(cur, Node) else canonical_hash({"kind": cur.kind, "edges": [e.model_dump(mode="json") for e in cur.edges]}),
+            "inputs": sorted((r.role, r.scope, r.name, r.read_hash or r.content_hash, canonical_hash(r.pattern)) for r in resolved),
+            "realization": used,
+            "params": params,
+        }
+        if owed:
+            # The same data read while it still owes the exact is a different
+            # result (wet, not dry): it must not be served from a dry entry.
+            key_parts["owed"] = sorted(dict.fromkeys(owed))
+        cache_key = canonical_hash(key_parts)
 
         prior_env = self.store.get(manifest, envelope_id(node_id))
         prior = prior_env if isinstance(prior_env, Node) and prior_env.data.get("cache_key") == cache_key else None

@@ -116,3 +116,44 @@ def test_backfill_fills_a_gap_without_touching_the_live_segment_and_every_write_
     assert all(verify(store, m, segment_name(CAM, n)) for n in (1, 2, 3))
     retire(store, S, CAM, author="dock")
     assert _long(store).get("strip_closed") is True
+
+
+def test_a_reader_goes_wet_when_its_source_goes_away_even_though_its_data_is_the_same():
+    """Found by the toy keyhole demo: after the unplug the last-three-seconds
+    window read the same elements as before, so the production was a cache
+    hit on the dry result. What a result still owes is part of what it is."""
+    from nodecules.core.generation import RECIPE_ROLE, RECIPE_TEMPLATE_KIND, Realization
+    from nodecules.core.store import Edge
+
+    async def in_view(inputs, params):
+        return sorted({e["what"] for e in inputs["recent"] or []})
+
+    store = Store()
+    tx = store.transaction("lib", author="dev")
+    tx.put(Node(id="r", kind=RECIPE_TEMPLATE_KIND, scope="lib", data={"realization": "in_view@1", "params": {}}))
+    tx.commit()
+    tx = store.transaction(S, author="dev")
+    tx.put(Node(id="now", kind="view", scope=S, edges=(Edge(target=CAM, pattern=LAST_3S_NEAREST, role="recent"), Edge(target="r", scope="lib", role=RECIPE_ROLE))))
+    tx.commit()
+    open_segment(store, S, CAM, at_ms=0, author="dock")
+    append(store, S, CAM, *[_seen(i * 1000, (i + 1) * 1000, "cup") for i in range(5)], author="cam")
+    gen = Generator(store, [merge_realization(), Realization("in_view@1", in_view, deterministic=True)], author="gen")
+    dry = asyncio.run(gen.produce(S, "now"))
+    assert not dry.provisional
+    disconnect(store, S, CAM, at_ms=5000, author="dock")
+    wet = asyncio.run(gen.produce(S, "now"))
+    assert wet.provisional and not wet.cache_hit and wet.node.data == dry.node.data
+
+
+def test_the_toy_keyhole_demo_runs():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parents[2]
+    out = subprocess.run([sys.executable, str(here.parent / "demos" / "toy_keyhole.py")], capture_output=True, text=True, timeout=60, env={**os.environ, "PYTHONPATH": str(here)})
+    assert out.returncode == 0, out.stderr
+    assert "[wet: owes" in out.stdout and "strict: pending (not-yet)" in out.stdout
+    assert "strict: lost (gap)" in out.stdout and "exactly: exact: saw cat" in out.stdout
+    assert "coverage now: [[0, 604000]]" in out.stdout
